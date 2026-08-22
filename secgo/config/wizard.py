@@ -237,7 +237,7 @@ async def run_first_run_wizard(force: bool = False) -> None:
         console.print(f"  [{key}] provider={sub['provider']} baseURL={sub['baseURL']} apiKey={'****' if sub.get('apiKey') else '(未设置)'}")
     for name, agent in agents.items():
         console.print(f"  {name}: sub={agent['subscription']}, model={agent['modelId']}, thinking={agent['thinkingLevel']}")
-    console.print(f"  web: 端口={web_port} 访问密码=固定（{web_password}）")
+    console.print(f"  web: 端口={web_port} 访问认证=已启用")
 
     confirm = _input("确认写入配置? (y/N)", default="y").lower()
     if confirm not in ("y", "yes"):
