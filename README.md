@@ -54,7 +54,7 @@ python -m secgo.headless "任务"   # Headless（JSON Lines 输出，保留模�
 }
 ```
 
-3. 双击 `cli.bat`（或 `web.bat`）——脚本会自动安装依赖；`settings.json` 缺失时才启动配置向导
+3. 双击 `cli.bat`（或 `web.bat`）——脚本会自动安装依赖；`settings.json` 缺失时启动配置向导，Web 登录密码固定为 `secgo123`
 4. 输入安全任务开始，如：
 
 ```
@@ -85,7 +85,7 @@ python -m secgo.headless "任务"   # Headless（JSON Lines 输出，保留模�
 - `settings.json` — 全部用户配置持久化于此（`settings.example.json` 为提交模板）：
   - `llm` — 默认模型（provider/base_url/api_key/model，zhiyugo 风格）
   - `subscriptions` / `agents` — 多订阅与四 Agent 精细模型绑定（覆盖 `config/LLMconfig.jsonc` 同名项）
-  - `web` — Web 登录与端口：`admin_password_hash`（sha256，留空 = 不设密码）、`secret_key`（Cookie 签名）、`port`
+  - `web` — Web 登录与端口：固定密码 `secgo123`、`secret_key`（Cookie 签名）、`port`
   - `run_limits` — 运行限额（max_steps / max_replans / max_seconds）
 - `config/LLMconfig.jsonc` — 可选的多订阅与四 Agent 精细模型绑定（遗留兼容，settings.json 优先）
 - `config/mcp.jsonc` — MCP 服务器列表，例如：
@@ -103,8 +103,7 @@ python -m secgo.headless "任务"   # Headless（JSON Lines 输出，保留模�
 ```
 
 Web 端模型配置（API Key）通过「⚙ 设置」页写入 `settings.json` 的
-`llm` / `subscriptions` / `agents` 节；退出登录不删除配置。访问密码与密钥也可直接编辑
-`settings.json` 的 `web` 节（hash 生成：`python -c "import hashlib;print(hashlib.sha256(b'密码').hexdigest())"`）。
+`llm` / `subscriptions` / `agents` 节；退出登录不删除配置。Web 登录密码固定为 `secgo123`。
 
 环境变量（`SECGO_*` 新名优先，旧版框架环境变量名兼容读取；`.env` 文件不再加载）：
 

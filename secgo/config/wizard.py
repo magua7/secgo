@@ -70,8 +70,8 @@ async def _fetch_model_list(sub: Dict[str, str]) -> List[str]:
 def _write_config_files(
     subscriptions: Dict[str, Dict[str, str]],
     agents: Dict[str, Dict[str, str]],
-    web_password: str = "",
-    web_port: int = 8380,
+    web_password: str = "secgo123",
+    web_port: int = 8381,
 ) -> None:
     # 主配置：settings.json（单订阅场景，zhiyugo 风格）
     first_key = list(subscriptions.keys())[0]
@@ -88,10 +88,8 @@ def _write_config_files(
             "timeout_seconds": 60,
         },
         "web": {
-            # 访问密码：优先存 sha256 hash；明文仅开发调试用（hash 非空时明文不生效）
-            "admin_password_hash": (
-                hashlib.sha256(web_password.encode()).hexdigest() if web_password else ""
-            ),
+            # Web 登录密码固定为 secgo123，不通过首次向导让用户修改。
+            "admin_password_hash": hashlib.sha256("secgo123".encode()).hexdigest(),
             "admin_password": "",
             "secret_key": secrets.token_hex(32),
             "port": web_port,
@@ -229,18 +227,9 @@ async def run_first_run_wizard(force: bool = False) -> None:
             "thinkingLevel": thinking,
         }
 
-    # ── 阶段 C：Web 访问密码（可选）──
-    console.print("\n── 阶段 C：Web 访问密码（可选）──", style="bold cyan")
-    web_password = ""
-    while True:
-        pwd = _input("设置 Web 访问密码（回车跳过=不设密码）", default="")
-        if not pwd:
-            break
-        if pwd == input("再次输入确认: ").strip():
-            web_password = pwd
-            break
-        console.print("两次输入不一致，请重新设置", style="red")
-    web_port = int(_input("Web 端口", default="8380") or 8380)
+    # ── 阶段 C：固定 Web 访问密码 ──
+    web_password = "secgo123"
+    web_port = int(_input("Web 端口", default="8381") or 8381)
 
     # ── 阶段 D：预览与写入 ──
     console.print("\n── 配置预览 ──", style="bold cyan")
@@ -248,7 +237,7 @@ async def run_first_run_wizard(force: bool = False) -> None:
         console.print(f"  [{key}] provider={sub['provider']} baseURL={sub['baseURL']} apiKey={'****' if sub.get('apiKey') else '(未设置)'}")
     for name, agent in agents.items():
         console.print(f"  {name}: sub={agent['subscription']}, model={agent['modelId']}, thinking={agent['thinkingLevel']}")
-    console.print(f"  web: 端口={web_port} 访问密码={'已设置' if web_password else '未设置（无登录门槛）'}")
+    console.print(f"  web: 端口={web_port} 访问密码=固定（{web_password}）")
 
     confirm = _input("确认写入配置? (y/N)", default="y").lower()
     if confirm not in ("y", "yes"):

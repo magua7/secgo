@@ -120,6 +120,8 @@ app = FastAPI(title="SEC-GO Web", version="1.0.0")
 
 AUTH_COOKIE = "secgo_session"
 AUTH_TTL_SECONDS = 24 * 3600  # 会话 24 小时（配置持久化在 settings.json，不会过期）
+FIXED_WEB_PASSWORD = "secgo123"
+FIXED_WEB_PASSWORD_HASH = hashlib.sha256(FIXED_WEB_PASSWORD.encode()).hexdigest()
 # 登录态只在本次 Web 服务进程内有效；重启 web.bat 后旧 Cookie 自动失效。
 _AUTH_BOOT_ID = secrets.token_urlsafe(32)
 
@@ -129,8 +131,8 @@ def _web_credentials() -> tuple:
     web = get_config().web
     return (
         web.secretKey or "dev-insecure-secret-change-me-xxxxxxxxxxxxxxxxx",
-        (web.adminPasswordHash or "").strip(),
-        (web.adminPassword or "").strip(),
+        FIXED_WEB_PASSWORD_HASH,
+        "",
     )
 
 
@@ -158,7 +160,7 @@ def _verify_session_token(tok: Optional[str]) -> bool:
 
 
 def _auth_enabled() -> bool:
-    """是否启用访问密码。settings.json web 节既没设 hash 也没设明文时，视为不启用（开发单机模式）。"""
+    """固定使用 SEC-GO Web 登录密码。"""
     _, admin_pwd_hash, admin_pwd_plain = _web_credentials()
     return bool(admin_pwd_hash) or bool(admin_pwd_plain)
 
@@ -175,7 +177,7 @@ def _password_matches(input_pwd: str) -> bool:
 
 def _is_logged_in(secgo_session: Optional[str]) -> bool:
     if not _auth_enabled():
-        return True  # 没开密码 → 默认为已登录
+        return False
     return _verify_session_token(secgo_session)
 
 

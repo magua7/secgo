@@ -20,13 +20,13 @@
   },
   "agents": {},
   "web": {
-    // 访问密码 sha256 hash（可留空 = 不设密码）。生成：python -c "import hashlib;print(hashlib.sha256(b'密码').hexdigest())"
-    "admin_password_hash": "",
-    // 明文密码（仅调试用，hash 非空时优先用 hash）
+    // 固定 Web 访问密码为 secgo123，其 SHA-256 hash 如下
+    "admin_password_hash": "852fe90d33f87b285b3eeb6655f74266cddf66329ab6be5a28a98669003b7776",
+    // 明文密码不使用
     "admin_password": "",
     // Cookie 签名密钥：python -c "import secrets;print(secrets.token_hex(32))"
     "secret_key": "dev-insecure-secret-change-me-xxxxxxxxxxxxxxxxx",
-    "port": 8380
+    "port": 8381
   },
   "run_limits": {
     "max_steps": 50,
