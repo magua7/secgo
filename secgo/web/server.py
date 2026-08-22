@@ -40,7 +40,12 @@ from pydantic import BaseModel
 
 from ..config.config import SETTINGS_FILE, get_config, reset_config
 from ..config.jsonc import parse_jsonc, stringify_jsonc
-from ..kernel.handoff_engine import is_engine_awaiting_input, provide_user_input, run_engine
+from ..kernel.handoff_engine import (
+    cancel_waiting_input,
+    is_engine_awaiting_input,
+    provide_user_input,
+    run_engine,
+)
 from ..runtime.attachments import (
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENTS_PER_TASK,
@@ -259,6 +264,7 @@ def _make_done_cb(session_id: str, channel: SessionChannel):
     """
     def cb(task: asyncio.Task) -> None:
         _tasks.pop(session_id, None)
+        cancel_waiting_input(session_id)
         if task.cancelled():
             return  # 终止由 cancel 端点主动推送 engine:end(cancelled)
         exc = task.exception()
@@ -722,11 +728,13 @@ async def api_chat(request: Request, _auth=Depends(require_ready_state)) -> JSON
         engine_message = f"{_attachment_prompt(session_id, moved_attachments)}\n\n用户问题：\n{question}"
     channel = _get_channel(session_id)
 
-    # 若该会话引擎正挂起等待输入 → 喂入输入；否则启动新引擎
-    if session_id in _awaiting_sessions and is_engine_awaiting_input():
+    # resolver 是真实等待状态；_awaiting_sessions 仅用于事件/UI 追踪。
+    if is_engine_awaiting_input(session_id):
         _awaiting_sessions.discard(session_id)
-        provide_user_input(engine_message)
-        return JSONResponse({"sessionId": session_id, "accepted": True, "resumed": True})
+        if provide_user_input(session_id, engine_message):
+            return JSONResponse({"sessionId": session_id, "accepted": True, "resumed": True})
+    else:
+        _awaiting_sessions.discard(session_id)
 
     # 续聊预注入：会话已存在时，先把新消息写入持久化历史。
     # 引擎 run_engine 加载历史时会覆盖其初始 user_input（引擎内 messages 初值被历史替换），
@@ -755,6 +763,7 @@ async def api_cancel_session(session_id: str, _auth=Depends(require_ready_state)
     """终止正在运行的引擎任务：取消协程 + 推送 end 事件解锁前端。"""
     global _awaiting_sessions
     _awaiting_sessions.discard(session_id)
+    waiting_cancelled = cancel_waiting_input(session_id)
     task = _tasks.get(session_id)
     cancelled = False
     if task is not None and not task.done():
@@ -766,7 +775,7 @@ async def api_cancel_session(session_id: str, _auth=Depends(require_ready_state)
         "reason": "cancelled",
         "total_steps": 0,
     })
-    return JSONResponse({"sessionId": session_id, "cancelled": cancelled})
+    return JSONResponse({"sessionId": session_id, "cancelled": cancelled or waiting_cancelled})
 
 
 @app.get("/api/events")

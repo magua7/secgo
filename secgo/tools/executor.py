@@ -105,8 +105,6 @@ async def _dispatch_tool(
         )
     if tool_name == "web_search":
         return await execute_web_search(args.get("query") or "")
-    if tool_name == "task_complete":
-        return {"success": True, "output": f"任务已完成。摘要: {args.get('summary', '')}"}
     if tool_name == "skill_list":
         return _skill_list()
     if tool_name == "skill_read":

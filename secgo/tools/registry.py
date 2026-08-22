@@ -82,7 +82,7 @@ TASK_COMPLETE_DEF = ToolDefinition(
         {"summary": {"type": "string", "description": "任务完成摘要，简述完成了什么"}},
         ["summary"],
     ),
-    allowed_agents=[],
+    allowed_agents=["planner"],
 )
 
 SKILL_LIST_DEF = ToolDefinition(

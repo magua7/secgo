@@ -191,8 +191,11 @@ async def run_tui() -> None:
 
     session = PromptSession()
     awaiting = asyncio.Event()
+    awaiting_session_id: Optional[str] = None
 
-    def on_awaiting_input(_data: Dict[str, Any]) -> None:
+    def on_awaiting_input(data: Dict[str, Any]) -> None:
+        nonlocal awaiting_session_id
+        awaiting_session_id = data.get("session_id")
         awaiting.set()
 
     event_bus.on("engine:awaiting_input", on_awaiting_input)
@@ -232,9 +235,11 @@ async def run_tui() -> None:
                                 style=PROMPT_STYLE,
                             )
                         except (KeyboardInterrupt, EOFError):
-                            provide_user_input("[用户已中断等待，请输出当前阶段总结]")
+                            if awaiting_session_id:
+                                provide_user_input(awaiting_session_id, "[用户已中断等待，请输出当前阶段总结]")
                             continue
-                        provide_user_input(follow_up)
+                        if awaiting_session_id:
+                            provide_user_input(awaiting_session_id, follow_up)
                     else:
                         await asyncio.wait({engine_task}, timeout=0.1)
                 await engine_task

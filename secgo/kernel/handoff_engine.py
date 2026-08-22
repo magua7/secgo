@@ -70,30 +70,55 @@ def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ── 用户输入等待机制 ──────────────────────────────────────
 
-_input_resolver: Optional[asyncio.Future] = None
+CONTROL_TOOLS = {"handoff_to_agent", "task_complete"}
+AGENT_PROTOCOL_ERROR = """[Agent Protocol Error]
+
+A single Agent turn may contain either:
+1. one or more business tools; or
+2. exactly one control action.
+
+Do not mix business tools with handoff_to_agent or task_complete.
+Choose one action type and re-evaluate the task state."""
+
+_input_resolvers: Dict[str, asyncio.Future] = {}
 
 
-async def _wait_for_user_input() -> str:
-    global _input_resolver
+async def _wait_for_user_input(session_id: str) -> str:
     loop = asyncio.get_running_loop()
-    _input_resolver = loop.create_future()
+    future = loop.create_future()
+    previous = _input_resolvers.get(session_id)
+    if previous is not None and not previous.done():
+        previous.cancel()
+    _input_resolvers[session_id] = future
     try:
-        return await _input_resolver
+        return await future
     finally:
-        _input_resolver = None
+        if _input_resolvers.get(session_id) is future:
+            _input_resolvers.pop(session_id, None)
 
 
-def provide_user_input(user_input: str) -> None:
+def provide_user_input(session_id: str, user_input: str) -> bool:
     """向引擎提供新的用户输入，恢复被挂起的引擎循环。"""
-    global _input_resolver
-    if _input_resolver is not None and not _input_resolver.done():
-        resolver = _input_resolver
-        resolver.set_result(user_input)
+    future = _input_resolvers.get(session_id)
+    if future is None or future.done():
+        return False
+    future.set_result(user_input)
+    return True
 
 
-def is_engine_awaiting_input() -> bool:
-    global _input_resolver
-    return _input_resolver is not None and not _input_resolver.done()
+def is_engine_awaiting_input(session_id: str) -> bool:
+    future = _input_resolvers.get(session_id)
+    return future is not None and not future.done()
+
+
+def cancel_waiting_input(session_id: str) -> bool:
+    future = _input_resolvers.get(session_id)
+    if future is None or future.done():
+        _input_resolvers.pop(session_id, None)
+        return False
+    future.cancel()
+    _input_resolvers.pop(session_id, None)
+    return True
 
 
 def _mcp_tools_for_agent(agent_id: str, context: str) -> List[Dict[str, Any]]:
@@ -355,7 +380,146 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "text": response.text,
                 })
 
-            business_calls = [tc for tc in normalized_calls if tc["name"] != "handoff_to_agent"]
+            control_calls = [tc for tc in normalized_calls if tc["name"] in CONTROL_TOOLS]
+            business_calls = [tc for tc in normalized_calls if tc["name"] not in CONTROL_TOOLS]
+
+            if len(control_calls) > 1 or (control_calls and business_calls):
+                if supports_tools:
+                    for tc in normalized_calls:
+                        messages.append(format_tool_results(
+                            tc["id"], tc["name"],
+                            {"success": False, "error": AGENT_PROTOCOL_ERROR},
+                        ))
+                messages.append({"role": "user", "content": AGENT_PROTOCOL_ERROR})
+                save_session_state({
+                    "activeAgentId": active_agent_id,
+                    "messages": messages,
+                    "stepCount": step_count,
+                    "todoList": todo_tracker.get_all_tasks(),
+                })
+                continue
+
+            control_call = control_calls[0] if control_calls else None
+            if control_call is not None and control_call["name"] == "task_complete":
+                if active_agent_id != "planner":
+                    error_msg = (
+                        f'[Agent Permission Error] Agent "{active_agent_id}" cannot call '
+                        "task_complete. Only Planner may complete the overall task. "
+                        "Summarize the current stage and handoff according to allowed_handoffs."
+                    )
+                    if supports_tools:
+                        messages.append(format_tool_results(
+                            control_call["id"], control_call["name"],
+                            {"success": False, "error": error_msg},
+                        ))
+                    else:
+                        messages.append({"role": "user", "content": error_msg})
+                    save_session_state({
+                        "activeAgentId": active_agent_id,
+                        "messages": messages,
+                        "stepCount": step_count,
+                        "todoList": todo_tracker.get_all_tasks(),
+                    })
+                    continue
+
+                summary = str(control_call["arguments"].get("summary") or "")
+                if supports_tools:
+                    messages.append(format_tool_results(
+                        control_call["id"], control_call["name"],
+                        {"success": True, "output": summary},
+                    ))
+                save_session_state({
+                    "activeAgentId": active_agent_id,
+                    "messages": messages,
+                    "stepCount": step_count,
+                    "todoList": todo_tracker.get_all_tasks(),
+                    "completionSummary": summary,
+                })
+                flush_pending_save()
+                event_bus.emit("engine:end", {
+                    "session_id": sid,
+                    "reason": "completed",
+                    "total_steps": step_count,
+                    "summary": summary,
+                })
+                return {
+                    "reason": "completed",
+                    "total_steps": step_count,
+                    "summary": summary,
+                }
+
+            if control_call is not None and control_call["name"] == "handoff_to_agent":
+                args = control_call["arguments"]
+                target = args.get("target_agent_id", "")
+                reason = args.get("reason", "")
+                task = args.get("task", "")
+
+                try:
+                    get_agent(target)
+                except ValueError:
+                    error_msg = f'Agent "{target}" does not exist.'
+                    if supports_tools:
+                        messages.append(format_tool_results(
+                            control_call["id"], control_call["name"],
+                            {"success": False, "error": error_msg},
+                        ))
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": f"[工具结果 handoff_to_agent]: {json.dumps({'error': error_msg})}",
+                        })
+                    continue
+
+                if target not in agent.allowed_handoffs:
+                    error_msg = (
+                        f'Not allowed to handoff to "{target}". '
+                        f"Allowed: [{', '.join(agent.allowed_handoffs)}]"
+                    )
+                    if supports_tools:
+                        messages.append(format_tool_results(
+                            control_call["id"], control_call["name"],
+                            {"success": False, "error": error_msg},
+                        ))
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": f"[工具结果 handoff_to_agent]: {json.dumps({'error': error_msg})}",
+                        })
+                    continue
+
+                if supports_tools:
+                    messages.append(format_tool_results(
+                        control_call["id"], control_call["name"],
+                        {"success": True, "output": json.dumps({"target": target})},
+                    ))
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[工具结果 handoff_to_agent]: "
+                            f"{json.dumps({'success': True, 'target': target})}"
+                        ),
+                    })
+
+                prev_agent_id = active_agent_id
+                active_agent_id = target
+                event_bus.emit("agent:switch", {
+                    "session_id": sid,
+                    "from_agent_id": prev_agent_id,
+                    "to_agent_id": active_agent_id,
+                    "reason": reason,
+                })
+                save_session_state({
+                    "activeAgentId": active_agent_id,
+                    "messages": messages,
+                    "stepCount": step_count,
+                    "todoList": todo_tracker.get_all_tasks(),
+                })
+                messages.append({
+                    "role": "user",
+                    "content": f"[Handoff from {agent.name}]: {task}",
+                })
+                continue
 
             for tc in business_calls:
                 event_bus.emit("tool:stream-start", {
@@ -413,96 +577,6 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 "todoList": todo_tracker.get_all_tasks(),
             })
 
-            handoff_call = next(
-                (tc for tc in normalized_calls if tc["name"] == "handoff_to_agent"), None
-            )
-
-            if handoff_call is not None:
-                args = handoff_call["arguments"]
-                target = args.get("target_agent_id", "")
-                reason = args.get("reason", "")
-                task = args.get("task", "")
-
-                try:
-                    get_agent(target)
-                except ValueError:
-                    error_msg = f'Agent "{target}" does not exist.'
-                    if supports_tools:
-                        messages.append(format_tool_results(
-                            handoff_call["id"], handoff_call["name"],
-                            {"success": False, "error": error_msg},
-                        ))
-                    else:
-                        messages.append({
-                            "role": "user",
-                            "content": f"[工具结果 handoff_to_agent]: {json.dumps({'error': error_msg})}",
-                        })
-                    continue
-
-                if target not in agent.allowed_handoffs:
-                    error_msg = (
-                        f'Not allowed to handoff to "{target}". '
-                        f"Allowed: [{', '.join(agent.allowed_handoffs)}]"
-                    )
-                    if supports_tools:
-                        messages.append(format_tool_results(
-                            handoff_call["id"], handoff_call["name"],
-                            {"success": False, "error": error_msg},
-                        ))
-                    else:
-                        messages.append({
-                            "role": "user",
-                            "content": f"[工具结果 handoff_to_agent]: {json.dumps({'error': error_msg})}",
-                        })
-                    continue
-
-                if supports_tools:
-                    messages.append(format_tool_results(
-                        handoff_call["id"], handoff_call["name"],
-                        {"success": True, "output": json.dumps({"target": target})},
-                    ))
-                else:
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            f"[工具结果 handoff_to_agent]: "
-                            f"{json.dumps({'success': True, 'target': target})}"
-                        ),
-                    })
-
-                prev_agent_id = active_agent_id
-                active_agent_id = target
-
-                event_bus.emit("agent:switch", {
-                    "session_id": sid,
-                    "from_agent_id": prev_agent_id,
-                    "to_agent_id": active_agent_id,
-                    "reason": reason,
-                })
-                save_session_state({
-                    "activeAgentId": active_agent_id,
-                    "messages": messages,
-                    "stepCount": step_count,
-                    "todoList": todo_tracker.get_all_tasks(),
-                })
-
-                messages.append({
-                    "role": "user",
-                    "content": f"[Handoff from {agent.name}]: {task}",
-                })
-                continue
-
-            task_complete_call = next(
-                (tc for tc in normalized_calls if tc["name"] == "task_complete"), None
-            )
-            if task_complete_call is not None:
-                event_bus.emit("engine:end", {
-                    "session_id": sid,
-                    "reason": "completed",
-                    "total_steps": step_count,
-                })
-                return {"reason": "completed", "total_steps": step_count}
-
             if business_calls:
                 continue
 
@@ -524,7 +598,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
             })
 
             flush_pending_save()  # 挂起等待输入前落库，避免长挂起期间状态仅存于内存
-            new_user_input = await _wait_for_user_input()
+            new_user_input = await _wait_for_user_input(sid)
             event_bus.emit("engine:user_input", {
                 "session_id": sid,
                 "input": new_user_input,
@@ -539,5 +613,6 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
         })
         return {"reason": "max_steps", "total_steps": step_count}
     finally:
+        cancel_waiting_input(sid)
         flush_pending_save()  # 兜底：最后一步的保存必须落库
         session_manager.close()
