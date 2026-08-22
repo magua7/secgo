@@ -42,7 +42,6 @@ export function WorkspacePage({ theme, onThemeToggle, onOpenSettings }: Props) {
   const submissionStartedRef = useRef(false)
   const displayedExecution = executionForTurnSubmission(state, submitting ? 'pending' : turnFailed ? 'failed' : null)
   const running = submitting || state.status === 'running' || state.status === 'loading'
-  const statusLabel = submitting ? '提交中' : turnFailed ? '发送失败' : displayedExecution.status === 'running' || displayedExecution.status === 'loading' ? '运行中' : displayedExecution.status === 'awaiting_input' ? '等待输入' : displayedExecution.status === 'completed' ? '已完成' : displayedExecution.status === 'cancelled' ? '已停止' : displayedExecution.status === 'error' ? '执行异常' : '就绪'
   const activeTitle = sessions.find((session) => session.id === sessionId)?.title || (question ? question.slice(0, 48) : '新建任务')
   const showTaskStatus = Boolean(sessionId || question || state.status !== 'idle')
   const liveTurn = useMemo(() => liveExecutionToTurn(question, displayedExecution), [question, displayedExecution])
@@ -123,7 +122,7 @@ export function WorkspacePage({ theme, onThemeToggle, onOpenSettings }: Props) {
   const toggleRightPanel = () => setRightVisible(!rightVisible)
 
   return <div className="workspace-page" style={workspaceColumns}>
-    <header className="workspace-top"><div className="workspace-brand"><button onClick={() => { window.location.hash = '#/' }}><Brand /></button></div><div className="workspace-task-title">{showTaskStatus && <span>{statusLabel}</span>}<strong>{activeTitle}</strong></div><div className="workspace-actions"><span className="connection"><i className={state.connection} />{state.connection === 'reconnecting' ? '重连中' : '在线'}</span><ThemeToggle theme={theme} onToggle={onThemeToggle} /><span className="user-label"><Icon name="user" />用户</span><button className="icon-button" onClick={onOpenSettings} aria-label="打开设置"><Icon name="settings" /></button></div></header>
+    <header className="workspace-top"><div className="workspace-brand"><button onClick={() => { window.location.hash = '#/' }}><Brand /></button></div><div className="workspace-task-title"><strong>{activeTitle}</strong></div><div className="workspace-actions"><span className="connection"><i className={state.connection} />{state.connection === 'reconnecting' ? '重连中' : '在线'}</span><ThemeToggle theme={theme} onToggle={onThemeToggle} /><span className="user-label"><Icon name="user" />用户</span><button className="icon-button" onClick={onOpenSettings} aria-label="打开设置"><Icon name="settings" /></button></div></header>
     <div className="workspace-body">
       <div className={`panel-shell left-panel-shell ${leftMode}`}><Sidebar mode={leftMode} sessions={sessions} currentId={sessionId} onCycle={cycleLeft} onNew={create} onSelect={(id) => void select(id)} onRename={(session) => void rename(session)} onDelete={(session) => void remove(session)} onSettings={onOpenSettings} /><button className="panel-edge-handle left" onClick={cycleLeft} aria-label={leftMode === 'hidden' ? '展开历史侧栏' : '折叠历史侧栏'}>{leftMode === 'hidden' ? '›' : '‹'}</button></div>
       <main className="workspace-center">

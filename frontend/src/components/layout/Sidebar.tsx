@@ -61,7 +61,7 @@ export function Sidebar(props: Props) {
       </div>)}
     </section>)}</div>
     {openMenu && <SessionContextMenu session={openMenu.session} anchorRect={openMenu.anchorRect} onRename={props.onRename} onDelete={props.onDelete} onClose={closeMenu} menuRef={menuRef} />}
-    <div className="sidebar-footer"><span><Icon name="user" />用户</span><button className="icon-button" onClick={props.onSettings} aria-label="打开设置"><Icon name="settings" /></button></div>
+    
   </aside>
 }
 

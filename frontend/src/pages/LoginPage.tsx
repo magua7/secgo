@@ -26,7 +26,7 @@ export function LoginPage({ initialTheme: _initialTheme }: { initialTheme: Theme
         {message && <div className="login-message">{message}</div>}
         <button className="login-submit" disabled={loading}>{loading ? '正在进入…' : <>进入系统 <span>→</span></>}</button>
       </form>
-      <div className="login-role"><i /><span><Icon name="user" /> 用户</span><i /></div>
+      
     </section>
   </main>
 }
