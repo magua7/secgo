@@ -12,9 +12,9 @@ venv/
 # 依赖
 node_modules/
 
-# 运行时数据
-runtime/memory/
-runtime/workspace/
+# 运行时数据（仅忽略项目根目录下的用户数据）
+/runtime/memory/
+/runtime/workspace/
 
 # 技能库内嵌套仓库残留
 skill/php-audit-skills/.git
@@ -31,8 +31,8 @@ skill/**/.git
 # 虚拟环境（补充：本项目历史遗留的 jbgs）
 jbgs/
 
-# 运行时数据（补充：日志等根级文件）
-runtime/
+# 运行时数据（补充：项目根级日志等文件）
+/runtime/
 
 # 测试缓存
 .pytest_cache/

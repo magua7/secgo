@@ -20,7 +20,7 @@
 | 脚本 | 形态 | 说明 |
 | ---- | ---- | ---- |
 | `cli.bat` | CLI 终端（交互式 TUI） | rich + prompt_toolkit 渲染，支持 `/skill /mcp /model /session` 命令 |
-| `web.bat` | Web 浏览器页面 | FastAPI + SSE 事件流，启动后自动打开 `http://localhost:8380` |
+| `web.bat` | Web 浏览器页面 | FastAPI + SSE 事件流，启动后自动打开 `http://localhost:8381` |
 
 两个脚本均自动完成：检测 Python → 首次运行引导配置向导 → 安装依赖 → 启动。
 端口可用环境变量 `SECGO_WEB_PORT` 覆盖。
@@ -115,7 +115,7 @@ Web 端模型配置（API Key）通过「⚙ 设置」页写入 `settings.json` 
 | `SECGO_MAX_STEPS` | 单任务最大步数 |
 | `SECGO_WORKSPACE_DIR` | 工作区目录 |
 | `SECGO_SKILLS_DIR` | 技能库根目录（默认项目 `skill/`） |
-| `SECGO_WEB_PORT` | Web 端口（默认取 settings.json `web.port`，即 8380） |
+| `SECGO_WEB_PORT` | Web 端口（启动脚本默认 8381；可通过环境变量覆盖） |
 | `SECGO_ALLOWED_COMMANDS` / `SECGO_BLOCKED_COMMANDS` | 命令白名单/黑名单（逗号分隔） |
 
 ## 项目结构
