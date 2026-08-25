@@ -157,6 +157,111 @@ class WebModelSettingsTests(unittest.TestCase):
         self.assertNotIn("research", saved["agents"])
         self.assertEqual(saved["subscriptions"]["research"]["apiKey"], "research-key")
 
+    def test_first_time_enabled_agent_requires_independent_key(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://default.example/v1",
+                "model": "default-model", "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                }
+            },
+            "agents": {},
+        }
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+            {"research": {
+                "enabled": True,
+                "config": {
+                    "provider": "openai", "base_url": "https://research.example/v1",
+                    "model": "research-model",
+                },
+            }},
+        )
+
+        self.assertIn("Research", error)
+        self.assertFalse(body["saved"])
+        self.assertIn("API Key", body["validation"]["research"]["error"])
+        self.assertEqual(saved, initial)
+
+    def test_saved_agent_key_can_be_reused_when_reenabling_override(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://default.example/v1",
+                "model": "default-model", "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                },
+                "research": {
+                    "provider": "openai", "baseURL": "https://research.example/v1",
+                    "modelId": "research-model", "apiKey": "saved-research-key",
+                },
+            },
+            "agents": {},
+        }
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+            {"research": {
+                "enabled": True,
+                "config": {
+                    "provider": "openai", "base_url": "https://research.example/v1",
+                    "model": "research-model",
+                },
+            }},
+        )
+
+        self.assertIsNone(error)
+        self.assertTrue(body["saved"])
+        self.assertEqual(saved["agents"]["research"]["subscription"], "research")
+        self.assertEqual(saved["subscriptions"]["research"]["apiKey"], "saved-research-key")
+
+    def test_failed_agent_key_replacement_preserves_previous_key(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://default.example/v1",
+                "model": "default-model", "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                },
+                "research": {
+                    "provider": "openai", "baseURL": "https://research.example/v1",
+                    "modelId": "research-model", "apiKey": "working-research-key",
+                },
+            },
+            "agents": {
+                "research": {"subscription": "research", "modelId": "research-model", "thinkingLevel": "low"},
+            },
+        }
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+            {"research": {
+                "enabled": True,
+                "config": {
+                    "provider": "openai", "base_url": "https://research.example/v1",
+                    "model": "research-model", "api_key": "invalid-research-key",
+                },
+            }},
+            validator=lambda provider, url, key, model: (False, "HTTP 401") if key == "invalid-research-key" else (True, ""),
+        )
+
+        self.assertIn("Research", error)
+        self.assertFalse(body["saved"])
+        self.assertIn("新 API Key 校验失败", body["validation"]["research"]["error"])
+        self.assertEqual(saved["subscriptions"]["research"]["apiKey"], "working-research-key")
+        self.assertEqual(saved, initial)
+
     def test_one_agent_validation_failure_aborts_every_change(self) -> None:
         initial = {
             "llm": {
