@@ -440,6 +440,7 @@ def _clean_provider(provider: str) -> str:
 
 class _KeySetupReq(BaseModel):
     default: Optional[Dict[str, Any]] = None
+    agents: Optional[Dict[str, Dict[str, Any]]] = None
     planner: Optional[Dict[str, Any]] = None
     # 字段名用 validate_keys，避免覆盖 Pydantic BaseModel 内置 validate 方法（否则启动会 UserWarning）
     validate_keys: bool = True
@@ -452,28 +453,71 @@ class _AttachmentUploadReq(BaseModel):
 
 
 def _save_model_config(default_cfg: Optional[Dict[str, Any]],
-                       planner_cfg: Optional[Dict[str, Any]],
+                       agent_configs: Optional[Dict[str, Any]],
                        validate_keys: bool) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
     """把 default/planner 配置写入 settings.json，返回 (错误信息, 成功响应体)。"""
-    def _check(cfg: Dict[str, Any], label: str) -> Optional[str]:
+    def _failure(config_id: str, message: str) -> tuple[str, Dict[str, Any]]:
+        return message, {
+            "ok": False,
+            "saved": False,
+            "validation": {config_id: {"ok": False, "error": message}},
+            "error": message,
+        }
+
+    def _check(cfg: Dict[str, Any], label: str, stored_key: str) -> tuple[Optional[str], str]:
         if not cfg.get("base_url") or not cfg.get("model"):
-            return f"{label}：base_url 与 model 不能为空"
-        if not cfg.get("api_key"):
-            return f"{label}：API Key 不能为空"
-        return None
+            return f"{label}：base_url 与 model 不能为空", ""
+        submitted_key = str(cfg.get("api_key") or "").strip()
+        if "*" in submitted_key:
+            return f"{label}：API Key 不能使用掩码值", ""
+        effective_key = submitted_key or stored_key
+        if not effective_key:
+            return f"{label}：API Key 不能为空", ""
+        return None, effective_key
+
+    # 先读取持久化源，以便空输入安全复用真实 Key；绝不从掩码状态反推凭据。
+    existing = {}
+    try:
+        existing = parse_jsonc(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
+    except OSError:
+        pass
+
+    def _stored_key(config_id: str) -> str:
+        if config_id == "default":
+            return str(
+                ((existing.get("subscriptions") or {}).get("coding") or {}).get("apiKey")
+                or (existing.get("llm") or {}).get("api_key")
+                or ""
+            )
+        return str(((existing.get("subscriptions") or {}).get(config_id) or {}).get("apiKey") or "")
+
+    planner_cfg: Optional[Dict[str, Any]] = None
+    if agent_configs:
+        if "planner" in agent_configs and isinstance(agent_configs.get("planner"), dict):
+            planner_request = agent_configs["planner"]
+            if "enabled" in planner_request:
+                if planner_request.get("enabled"):
+                    planner_cfg = dict(planner_request.get("config") or {})
+            else:
+                planner_cfg = planner_request
+        elif "base_url" in agent_configs or "model" in agent_configs:
+            # 兼容旧版调用：第二个参数直接是 Planner 配置。
+            planner_cfg = agent_configs
 
     if default_cfg is None:
-        return "必须配置默认模型（default）", None
+        return _failure("default", "必须配置默认模型（default）")
 
-    err = _check(default_cfg, "默认模型")
+    err, default_key = _check(default_cfg, "默认模型", _stored_key("default"))
     if err:
-        return err, None
+        return _failure("default", err)
+    default_cfg = {**default_cfg, "api_key": default_key}
 
     planner_sub_name = None
     if planner_cfg is not None:
-        err = _check(planner_cfg, "Planner 模型")
+        err, planner_key = _check(planner_cfg, "Planner 模型", _stored_key("planner"))
         if err:
-            return err, None
+            return _failure("planner", err)
+        planner_cfg = {**planner_cfg, "api_key": planner_key}
         planner_sub_name = "planner"
 
     if validate_keys:
@@ -484,13 +528,6 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
             ok, msg = _validate_subscription(planner_cfg.get("provider", "openai"), planner_cfg["base_url"], planner_cfg["api_key"], planner_cfg["model"])
             if not ok:
                 return f"Planner 模型校验失败 - {msg}", None
-
-    # 读当前 settings.json（JSONC 解析保留注释）
-    existing = {}
-    try:
-        existing = parse_jsonc(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
-    except OSError:
-        pass
 
     default_provider = _clean_provider(default_cfg.get("provider", "openai"))
     default_sub = {
@@ -538,15 +575,19 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
         return f"写入 settings.json 失败：{e}", None
 
     reset_config()  # 下次 get_config() 重新加载，新配置立即生效
-    return None, {"ok": True, "next": "/"}
+    validation = {"default": {"ok": True, "error": None}}
+    if planner_cfg is not None:
+        validation["planner"] = {"ok": True, "error": None}
+    return None, {"ok": True, "saved": True, "next": "/", "validation": validation}
 
 
 @app.post("/api/setup-keys")
 async def api_setup_keys(req: _KeySetupReq,
                          _auth=Depends(require_logged_in)) -> JSONResponse:
-    err, body = _save_model_config(req.default, req.planner, req.validate_keys)
+    submitted_agents: Optional[Dict[str, Any]] = req.agents if req.agents is not None else req.planner
+    err, body = _save_model_config(req.default, submitted_agents, req.validate_keys)
     if err:
-        return JSONResponse({"ok": False, "error": err}, status_code=400)
+        return JSONResponse(body or {"ok": False, "saved": False, "error": err}, status_code=400)
     return JSONResponse(body)
 
 

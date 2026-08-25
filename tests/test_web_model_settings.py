@@ -12,6 +12,86 @@ from secgo.web import server
 
 
 class WebModelSettingsTests(unittest.TestCase):
+    def _attempt_new_save(
+        self,
+        initial: dict,
+        default: dict,
+        agents: dict,
+        validate_keys: bool = False,
+    ) -> tuple[str | None, dict | None, dict]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(initial), encoding="utf-8")
+            with (
+                patch.object(server, "SETTINGS_FILE", settings_file),
+                patch.object(server, "reset_config"),
+            ):
+                error, body = server._save_model_config(default, agents, validate_keys)
+            saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8"))
+            return error, body, saved
+
+    def test_default_omitted_key_reuses_persisted_key(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True,
+                "provider": "openai",
+                "base_url": "https://old.example/v1",
+                "model": "old-model",
+                "api_key": "stored-default",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai",
+                    "baseURL": "https://old.example/v1",
+                    "modelId": "old-model",
+                    "apiKey": "stored-default",
+                }
+            },
+            "agents": {},
+        }
+
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {
+                "provider": "openai",
+                "base_url": "https://new.example/v1",
+                "model": "new-model",
+            },
+            {},
+        )
+
+        self.assertIsNone(error)
+        self.assertTrue(body["saved"])
+        self.assertEqual(saved["llm"]["api_key"], "stored-default")
+        self.assertEqual(saved["subscriptions"]["coding"]["apiKey"], "stored-default")
+
+    def test_masked_value_is_never_accepted_as_a_key(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True,
+                "provider": "openai",
+                "base_url": "https://api.example/v1",
+                "model": "working-model",
+                "api_key": "working-default",
+            }
+        }
+
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {
+                "provider": "openai",
+                "base_url": "https://api.example/v1",
+                "model": "replacement-model",
+                "api_key": "sk-***9e",
+            },
+            {},
+        )
+
+        self.assertIn("掩码", error)
+        self.assertFalse(body["saved"])
+        self.assertIn("掩码", body["validation"]["default"]["error"])
+        self.assertEqual(saved, initial)
+
     def _save(
         self,
         initial: dict,
@@ -27,7 +107,9 @@ class WebModelSettingsTests(unittest.TestCase):
             ):
                 error, body = server._save_model_config(default, planner, False)
             self.assertIsNone(error)
-            self.assertEqual(body, {"ok": True, "next": "/"})
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["saved"])
+            self.assertEqual(body["next"], "/")
             return server.parse_jsonc(settings_file.read_text(encoding="utf-8"))
 
     def test_custom_provider_is_saved_verbatim(self) -> None:
