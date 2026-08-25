@@ -102,3 +102,25 @@
   height: 32px;
   overflow: visible;
 }
+
+/* Agent model configuration */
+.model-settings-section .model-config-block{margin-top:14px}
+.model-settings-section .model-config-block>fieldset{margin:0}
+.agent-model-section>p{margin:5px 0 14px;color:var(--text-secondary);font-size:12px}
+.agent-override-list{display:grid;gap:9px}
+.agent-override-card{overflow:hidden;border:1px solid var(--border-subtle);border-radius:9px;background:color-mix(in srgb,var(--bg-surface) 92%,transparent)}
+.agent-override-card.enabled{border-color:color-mix(in srgb,var(--accent-amber) 62%,var(--border-subtle))}
+.agent-override-card>.switch-row{padding:11px 13px}
+.agent-override-card .agent-identity{min-width:0;display:grid;grid-template-columns:auto 1fr;column-gap:9px;align-items:baseline}
+.agent-override-card .agent-identity>strong{font:600 15px var(--font-serif)}
+.agent-override-card .agent-identity>small{min-width:0;color:var(--text-secondary);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-override-card .agent-identity>em{grid-column:1/-1;margin-top:3px;color:var(--text-faint);font-size:10px;font-style:normal}
+.agent-override-card.enabled .agent-identity>em{color:var(--success)}
+.agent-override-card>.model-config-block{margin:0;padding:0 12px 12px;border-top:1px solid var(--border-subtle)}
+.model-validation{margin:7px 2px 0;font-size:11px;line-height:1.45}
+.model-validation.valid{color:var(--success)}
+.model-validation.validating{color:var(--accent-amber)}
+.model-validation.invalid{color:var(--risk)}
+.model-settings-section .field-hint{display:block;margin-top:5px;line-height:1.45}
+.model-settings-section .key-mask{white-space:nowrap}
+@media(max-width:760px){.agent-override-card .agent-identity{grid-template-columns:1fr}.agent-override-card .agent-identity>small{white-space:normal}.model-settings-section .field-label-row{align-items:flex-start;flex-direction:column}.model-settings-section .field-label-row .key-mask{margin-left:0}}
