@@ -262,6 +262,108 @@ class WebModelSettingsTests(unittest.TestCase):
         self.assertEqual(saved["subscriptions"]["research"]["apiKey"], "working-research-key")
         self.assertEqual(saved, initial)
 
+    def test_failed_atomic_replace_preserves_previous_settings(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://old.example/v1",
+                "model": "old-model", "api_key": "old-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://old.example/v1",
+                    "modelId": "old-model", "apiKey": "old-key",
+                }
+            },
+            "agents": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(initial), encoding="utf-8")
+            with (
+                patch.object(server, "SETTINGS_FILE", settings_file),
+                patch.object(server, "reset_config"),
+                patch.object(server, "_validate_subscription", return_value=(True, "")),
+                patch.object(server.os, "replace", side_effect=OSError("replace failed")),
+            ):
+                error, body = server._save_model_config(
+                    {"provider": "openai", "base_url": "https://new.example/v1", "model": "new-model", "api_key": "new-key"},
+                    {},
+                    False,
+                )
+
+            after = server.parse_jsonc(settings_file.read_text(encoding="utf-8"))
+            leftovers = list(settings_file.parent.glob(f".{settings_file.name}.*.tmp"))
+
+        self.assertIn("写入 settings.json 失败", error)
+        self.assertFalse(body["saved"])
+        self.assertEqual(after, initial)
+        self.assertEqual(leftovers, [])
+
+    def test_active_legacy_planner_binding_wins_over_dormant_semantic_subscription(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://default.example/v1",
+                "model": "default-model", "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                },
+                "planner": {
+                    "provider": "openai", "baseURL": "https://dormant.example/v1",
+                    "modelId": "dormant-model", "apiKey": "dormant-key",
+                },
+                "glm": {
+                    "provider": "openai", "baseURL": "https://active.example/v1",
+                    "modelId": "active-model", "apiKey": "active-legacy-key",
+                },
+            },
+            "agents": {
+                "planner": {"subscription": "glm", "modelId": "active-model", "thinkingLevel": "medium"},
+            },
+        }
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+            {"planner": {
+                "enabled": True,
+                "config": {
+                    "provider": "openai", "base_url": "https://active.example/v1", "model": "active-model",
+                },
+            }},
+        )
+
+        self.assertIsNone(error)
+        self.assertTrue(body["saved"])
+        self.assertEqual(saved["subscriptions"]["planner"]["apiKey"], "active-legacy-key")
+
+    def test_malformed_agent_config_returns_structured_validation(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://default.example/v1",
+                "model": "default-model", "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                }
+            },
+            "agents": {},
+        }
+
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+            {"research": {"enabled": True, "config": "bad"}},
+        )
+
+        self.assertIn("Research", error)
+        self.assertFalse(body["saved"])
+        self.assertIn("格式无效", body["validation"]["research"]["error"])
+        self.assertEqual(saved, initial)
+
     def test_one_agent_validation_failure_aborts_every_change(self) -> None:
         initial = {
             "llm": {
@@ -529,6 +631,38 @@ class WebModelSettingsTests(unittest.TestCase):
         body = json.loads(response.body)
         self.assertFalse(body["agents"]["research"]["has_key"])
         self.assertEqual(body["agents"]["research"]["api_key_masked"], "")
+
+    def test_keys_status_prefers_active_legacy_planner_binding(self) -> None:
+        coding = SimpleNamespace(provider="openai", baseURL="https://default.example/v1", modelId="default", apiKey="default-key")
+        dormant = SimpleNamespace(provider="openai", baseURL="https://dormant.example/v1", modelId="dormant", apiKey="dormant-key")
+        active = SimpleNamespace(provider="openai", baseURL="https://active.example/v1", modelId="active", apiKey="active-legacy-key")
+        cfg = SimpleNamespace(llm=SimpleNamespace(
+            subscriptions={"coding": coding, "planner": dormant, "glm": active},
+            agents={"planner": SimpleNamespace(subscription="glm", modelId="active")},
+        ))
+        raw = {
+            "subscriptions": {
+                "coding": {"provider": "openai", "baseURL": coding.baseURL, "modelId": coding.modelId, "apiKey": coding.apiKey},
+                "planner": {"provider": "openai", "baseURL": dormant.baseURL, "modelId": dormant.modelId, "apiKey": dormant.apiKey},
+                "glm": {"provider": "openai", "baseURL": active.baseURL, "modelId": active.modelId, "apiKey": active.apiKey},
+            },
+            "agents": {"planner": {"subscription": "glm", "modelId": "active"}},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(raw), encoding="utf-8")
+            with (
+                patch.object(server, "SETTINGS_FILE", settings_file),
+                patch.object(server, "get_config", return_value=cfg),
+                patch.object(server, "_config_ready", return_value=True),
+                patch.object(server, "_auth_enabled", return_value=True),
+            ):
+                response = asyncio.run(server.api_keys_status())
+
+        body = json.loads(response.body)
+        self.assertTrue(body["agents"]["planner"]["enabled"])
+        self.assertEqual(body["agents"]["planner"]["model"], "active")
+        self.assertEqual(body["agents"]["planner"]["api_key_masked"], "act***key")
 
 
 if __name__ == "__main__":

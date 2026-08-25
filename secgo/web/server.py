@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import secrets
+import tempfile
 import threading
 import time
 import uuid
@@ -481,15 +482,15 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
                 or ""
             )
         subscriptions = existing.get("subscriptions") or {}
-        saved = (subscriptions.get(config_id) or {}).get("apiKey")
-        if saved:
-            return str(saved)
         # Legacy Planner configurations may still point at a differently named subscription.
         if config_id == "planner":
             planner_agent = (existing.get("agents") or {}).get("planner") or {}
             legacy_name = planner_agent.get("subscription") or ""
-            return str((subscriptions.get(legacy_name) or {}).get("apiKey") or "")
-        return ""
+            if legacy_name and legacy_name != "coding":
+                active_key = (subscriptions.get(legacy_name) or {}).get("apiKey")
+                if active_key:
+                    return str(active_key)
+        return str((subscriptions.get(config_id) or {}).get("apiKey") or "")
 
     def _normalize_agents() -> tuple[Dict[str, Dict[str, Any]], set[str]]:
         requests = {
@@ -504,12 +505,27 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
             return requests, {"planner"}
         for agent_id in MODEL_AGENT_IDS:
             entry = agent_configs.get(agent_id)
+            if entry is None:
+                continue
             if not isinstance(entry, dict):
+                requests[agent_id] = {
+                    "enabled": True,
+                    "config": {},
+                    "error": f"{MODEL_AGENT_LABELS[agent_id]} 模型：配置格式无效",
+                }
                 continue
             if "enabled" in entry:
+                enabled_value = entry.get("enabled")
+                config_value = entry.get("config")
+                request_error = None
+                if not isinstance(enabled_value, bool):
+                    request_error = f"{MODEL_AGENT_LABELS[agent_id]} 模型：enabled 必须为布尔值"
+                if enabled_value is True and not isinstance(config_value, dict):
+                    request_error = f"{MODEL_AGENT_LABELS[agent_id]} 模型：配置格式无效"
                 requests[agent_id] = {
-                    "enabled": bool(entry.get("enabled")),
-                    "config": dict(entry.get("config") or {}),
+                    "enabled": enabled_value is True,
+                    "config": dict(config_value) if isinstance(config_value, dict) else {},
+                    "error": request_error,
                 }
             else:
                 requests[agent_id] = {"enabled": True, "config": dict(entry)}
@@ -531,9 +547,9 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
         base_url = str(cfg.get("base_url") or "").strip()
         model = str(cfg.get("model") or "").strip()
         submitted_key = str(cfg.get("api_key") or "").strip()
-        error = None
+        error = normalized_agents.get(config_id, {}).get("error")
         if not base_url or not model:
-            error = f"{label}：base_url 与 model 不能为空"
+            error = error or f"{label}：base_url 与 model 不能为空"
         elif "*" in submitted_key:
             error = f"{label}：API Key 不能使用掩码值"
         effective_key = submitted_key or _stored_key(config_id)
@@ -619,13 +635,33 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
     updated["agents"] = agents
 
     try:
-        SETTINGS_FILE.write_text(stringify_jsonc(updated), encoding="utf-8")
+        _write_settings_atomically(updated)
     except OSError as e:
         message = f"写入 settings.json 失败：{e}"
         return message, {"ok": False, "saved": False, "validation": validation, "error": message}
 
     reset_config()  # 下次 get_config() 重新加载，新配置立即生效
     return None, {"ok": True, "saved": True, "next": "/", "validation": validation}
+
+
+def _write_settings_atomically(updated: Dict[str, Any]) -> None:
+    """Flush a same-directory temporary file before replacing the live settings file."""
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{SETTINGS_FILE.name}.",
+        suffix=".tmp",
+        dir=SETTINGS_FILE.parent,
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as temp_file:
+            temp_file.write(stringify_jsonc(updated))
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, SETTINGS_FILE)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 @app.post("/api/setup-keys")
@@ -694,12 +730,12 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
             and loaded_agent
             and loaded_agent.subscription != "coding"
         )
-        saved_raw = (raw_subscriptions or {}).get(agent_id) if isinstance(raw_subscriptions, dict) else None
-        if agent_id == "planner" and saved_raw is None and requested_sub_name:
+        if agent_id == "planner" and requested_sub_name and requested_sub_name != "coding":
             saved_raw = (raw_subscriptions or {}).get(requested_sub_name) if isinstance(raw_subscriptions, dict) else None
-        saved_loaded = cfg.llm.subscriptions.get(agent_id)
-        if agent_id == "planner" and saved_loaded is None and requested_sub_name:
             saved_loaded = cfg.llm.subscriptions.get(requested_sub_name)
+        else:
+            saved_raw = (raw_subscriptions or {}).get(agent_id) if isinstance(raw_subscriptions, dict) else None
+            saved_loaded = cfg.llm.subscriptions.get(agent_id)
         if saved_raw is not None:
             agent_status[agent_id] = _raw_sub_info(
                 saved_raw,
