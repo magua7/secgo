@@ -534,7 +534,7 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
     normalized_agents, managed_agent_ids = _normalize_agents()
     configs: Dict[str, Dict[str, Any]] = {"default": dict(default_cfg or {})}
     for agent_id in MODEL_AGENT_IDS:
-        if normalized_agents[agent_id]["enabled"]:
+        if normalized_agents[agent_id]["enabled"] or normalized_agents[agent_id].get("error"):
             configs[agent_id] = normalized_agents[agent_id]["config"]
 
     validation: Dict[str, Dict[str, Any]] = {}

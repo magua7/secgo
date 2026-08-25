@@ -364,6 +364,39 @@ class WebModelSettingsTests(unittest.TestCase):
         self.assertIn("格式无效", body["validation"]["research"]["error"])
         self.assertEqual(saved, initial)
 
+    def test_non_boolean_agent_enabled_returns_structured_validation(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True, "provider": "openai", "base_url": "https://default.example/v1",
+                "model": "default-model", "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                },
+                "research": {
+                    "provider": "openai", "baseURL": "https://research.example/v1",
+                    "modelId": "research-model", "apiKey": "research-key",
+                },
+            },
+            "agents": {
+                "research": {"subscription": "research", "modelId": "research-model", "thinkingLevel": "low"},
+            },
+        }
+        for invalid_enabled in ("false", 0):
+            with self.subTest(invalid_enabled=invalid_enabled):
+                error, body, saved = self._attempt_new_save(
+                    initial,
+                    {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+                    {"research": {"enabled": invalid_enabled, "config": {}}},
+                )
+
+                self.assertIn("Research", error)
+                self.assertFalse(body["saved"])
+                self.assertIn("布尔值", body["validation"]["research"]["error"])
+                self.assertEqual(saved, initial)
+
     def test_one_agent_validation_failure_aborts_every_change(self) -> None:
         initial = {
             "llm": {
