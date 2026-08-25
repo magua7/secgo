@@ -640,12 +640,7 @@ async def api_setup_keys(req: _KeySetupReq,
 
 @app.get("/api/keys-status")
 async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
-    """只返回掩码配置状态，绝不返回明文 API Key。
-
-    planner 是否「专用」以 settings.json 的 agents.planner 为准：
-    配置加载时会为缺失的 Agent 自动绑定默认订阅（planner 复用默认模型），
-    那是引擎兜底而非用户显式配置，不算 has_planner。
-    """
+    """Return backend-generated masks and explicit override state, never plaintext keys."""
     def mask(k: Optional[str]) -> str:
         if not k:
             return ""
@@ -658,41 +653,59 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
         next(iter(cfg.llm.subscriptions.values())) if cfg.llm.subscriptions else None
     )
 
-    planner_raw = None
     try:
         raw_settings = parse_jsonc(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
     except OSError:
         raw_settings = {}
-    planner_agent_raw = (raw_settings.get("agents") or {}).get("planner")
-    loaded_planner = cfg.llm.agents.get("planner")
-    # 加载器会在专用订阅 Key/URL 不完整时将 Planner 回落到 coding。
-    # 此时状态页也必须显示“使用默认模型”，不能把已失效的订阅伪装成仍启用的独立模型。
-    if planner_agent_raw and loaded_planner and loaded_planner.subscription != "coding":
-        sub_name = planner_agent_raw.get("subscription") or ""
-        sub = cfg.llm.subscriptions.get(sub_name)
-        if sub:
-            planner_raw = {
-                "provider": sub.provider,
-                "base_url": sub.baseURL,
-                "model": planner_agent_raw.get("modelId") or sub.modelId,
-                "api_key_masked": mask(sub.apiKey),
-            }
+    raw_agents = raw_settings.get("agents") or {}
 
-    def _sub_info(sub) -> Dict[str, Any]:
+    def _sub_info(sub, *, enabled: bool, model: Optional[str] = None) -> Dict[str, Any]:
+        key = str(sub.apiKey or "")
         return {
+            "enabled": enabled,
             "provider": sub.provider,
             "base_url": sub.baseURL,
-            "model": sub.modelId,
-            "api_key_masked": mask(sub.apiKey),
+            "model": model or sub.modelId,
+            "has_key": bool(key),
+            "api_key_masked": mask(key),
         }
+
+    agent_status: Dict[str, Optional[Dict[str, Any]]] = {}
+    for agent_id in MODEL_AGENT_IDS:
+        raw_agent = raw_agents.get(agent_id) or {}
+        loaded_agent = cfg.llm.agents.get(agent_id)
+        requested_sub_name = str(raw_agent.get("subscription") or "")
+        enabled = bool(
+            raw_agent
+            and requested_sub_name
+            and requested_sub_name != "coding"
+            and loaded_agent
+            and loaded_agent.subscription != "coding"
+        )
+        saved_sub = cfg.llm.subscriptions.get(agent_id)
+        if agent_id == "planner" and saved_sub is None and requested_sub_name:
+            saved_sub = cfg.llm.subscriptions.get(requested_sub_name)
+        agent_status[agent_id] = (
+            _sub_info(
+                saved_sub,
+                enabled=enabled,
+                model=(raw_agent.get("modelId") if enabled else None),
+            )
+            if saved_sub else None
+        )
+
+    planner_status = agent_status["planner"]
+    enabled_planner = planner_status if planner_status and planner_status["enabled"] else None
 
     return JSONResponse({
         "auth_enabled": _auth_enabled(),
         "ready": _config_ready(),
         "has_default": default_sub is not None,
-        "default": _sub_info(default_sub) if default_sub else None,
-        "has_planner": planner_raw is not None,
-        "planner": planner_raw,
+        "default": _sub_info(default_sub, enabled=True) if default_sub else None,
+        "agents": agent_status,
+        # Backward-compatible fields for an older Settings frontend.
+        "has_planner": enabled_planner is not None,
+        "planner": enabled_planner,
     })
 
 

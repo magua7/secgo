@@ -1,4 +1,4 @@
-from secgo.config.config import _apply_settings_json
+from secgo.config.config import AgentModelConfig, SubscriptionConfig, _apply_settings_json
 
 
 def test_default_model_and_planner_reuse_arbitrary_custom_provider() -> None:
@@ -58,3 +58,36 @@ def test_explicit_planner_subscription_wins_over_default_model() -> None:
     assert agents["planner"].subscription == "planner"
     assert agents["planner"].modelId == "planner-model"
     assert subscriptions["planner"].provider == "Anthropic-compatible"
+
+
+def test_two_overrides_and_two_default_fallbacks_resolve_through_existing_path() -> None:
+    subscriptions = {
+        "planner": SubscriptionConfig("openai", "https://planner.example/v1", "planner-model", "planner-key"),
+        "research": SubscriptionConfig("openai", "https://research.example/v1", "research-model", "research-key"),
+    }
+    agents = {
+        "planner": AgentModelConfig("planner", "planner-model", "medium"),
+        "research": AgentModelConfig("research", "research-model", "low"),
+    }
+
+    _apply_settings_json(
+        subscriptions,
+        agents,
+        {
+            "llm": {
+                "provider": "openai",
+                "base_url": "https://default.example/v1",
+                "model": "default-model",
+                "api_key": "default-key",
+            }
+        },
+    )
+
+    assert agents["planner"].subscription == "planner"
+    assert agents["research"].subscription == "research"
+    assert agents["builder"].subscription == "coding"
+    assert agents["operator"].subscription == "coding"
+    assert subscriptions[agents["planner"].subscription].modelId == "planner-model"
+    assert subscriptions[agents["research"].subscription].modelId == "research-model"
+    assert subscriptions[agents["builder"].subscription].modelId == "default-model"
+    assert subscriptions[agents["operator"].subscription].modelId == "default-model"

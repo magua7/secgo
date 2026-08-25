@@ -322,6 +322,67 @@ class WebModelSettingsTests(unittest.TestCase):
         self.assertFalse(body["has_planner"])
         self.assertIsNone(body["planner"])
 
+    def test_keys_status_returns_all_agent_masks_and_enabled_state(self) -> None:
+        def sub(name: str, key: str):
+            return SimpleNamespace(
+                provider="openai",
+                baseURL=f"https://{name}.example/v1",
+                modelId=f"{name}-model",
+                apiKey=key,
+            )
+
+        subscriptions = {
+            "coding": sub("default", "default-secret-key"),
+            "planner": sub("planner", "planner-secret-key"),
+            "research": sub("research", "research-secret-key"),
+            "builder": sub("builder", "builder-secret-key"),
+            "operator": sub("operator", "operator-secret-key"),
+        }
+        loaded_agents = {
+            "planner": SimpleNamespace(subscription="planner", modelId="planner-model"),
+            "research": SimpleNamespace(subscription="research", modelId="research-model"),
+            "builder": SimpleNamespace(subscription="coding", modelId="default-model"),
+            "operator": SimpleNamespace(subscription="coding", modelId="default-model"),
+        }
+        cfg = SimpleNamespace(llm=SimpleNamespace(subscriptions=subscriptions, agents=loaded_agents))
+        raw = {
+            "subscriptions": {
+                name: {
+                    "provider": value.provider,
+                    "baseURL": value.baseURL,
+                    "modelId": value.modelId,
+                    "apiKey": value.apiKey,
+                }
+                for name, value in subscriptions.items()
+            },
+            "agents": {
+                "planner": {"subscription": "planner", "modelId": "planner-model"},
+                "research": {"subscription": "research", "modelId": "research-model"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(raw), encoding="utf-8")
+            with (
+                patch.object(server, "SETTINGS_FILE", settings_file),
+                patch.object(server, "get_config", return_value=cfg),
+                patch.object(server, "_config_ready", return_value=True),
+                patch.object(server, "_auth_enabled", return_value=True),
+            ):
+                response = asyncio.run(server.api_keys_status())
+
+        body = json.loads(response.body)
+        self.assertTrue(body["default"]["has_key"])
+        self.assertEqual(body["default"]["api_key_masked"], "def***key")
+        self.assertTrue(body["agents"]["planner"]["enabled"])
+        self.assertTrue(body["agents"]["research"]["enabled"])
+        self.assertFalse(body["agents"]["builder"]["enabled"])
+        self.assertTrue(body["agents"]["builder"]["has_key"])
+        self.assertFalse(body["agents"]["operator"]["enabled"])
+        encoded = response.body.decode("utf-8")
+        self.assertNotIn("builder-secret-key", encoded)
+        self.assertNotIn("operator-secret-key", encoded)
+
 
 if __name__ == "__main__":
     unittest.main()
