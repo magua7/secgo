@@ -93,6 +93,22 @@ describe('SettingsPanel model settings', () => {
     expect(screen.getByText('模型配置已保存')).toBeInTheDocument()
   })
 
+  it('clears plaintext after save even when the status refresh fails', async () => {
+    const user = userEvent.setup()
+    apiMocks.getKeysStatus
+      .mockResolvedValueOnce(status())
+      .mockRejectedValueOnce(new Error('状态接口不可用'))
+    render(<SettingsPanel onClose={vi.fn()} />)
+    const input = await screen.findByLabelText('默认模型（必填） API Key')
+
+    await user.type(input, 'new-default-secret')
+    await user.click(screen.getByRole('button', { name: '保存设置' }))
+
+    await waitFor(() => expect(apiMocks.getKeysStatus).toHaveBeenCalledTimes(2))
+    expect(input).toHaveValue('')
+    expect(screen.getByText(/模型配置已保存，但状态刷新失败/)).toBeInTheDocument()
+  })
+
   it('keeps the old mask visible beside a failed replacement', async () => {
     const user = userEvent.setup()
     apiMocks.getKeysStatus.mockResolvedValue(status({

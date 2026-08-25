@@ -115,10 +115,14 @@ export function SettingsPanel({ standalone = false, onClose, theme = 'light', on
       const result = await saveSetup(buildSetupPayload(defaultConfig, agentConfigs, validateKeys))
       if (!result.saved) throw Object.assign(new Error(result.error || '模型配置未保存'), { body: result })
       applyValidation(result, true)
-      const freshStatus = await getKeysStatus()
-      loadStatus(freshStatus)
       clearPlaintextKeys()
-      setMessage('模型配置已保存')
+      try {
+        const freshStatus = await getKeysStatus()
+        loadStatus(freshStatus)
+        setMessage('模型配置已保存')
+      } catch (refreshError) {
+        setMessage(`模型配置已保存，但状态刷新失败：${handleApiError(refreshError)}`)
+      }
       if (standalone) window.location.assign(result.next || '/')
     } catch (error) {
       const response = (error as { body?: SetupResponse }).body
