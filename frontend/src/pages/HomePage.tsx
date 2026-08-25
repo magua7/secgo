@@ -66,7 +66,7 @@ export function HomePage() {
         </div>{error && <p className="hero-error">{error}</p>}
       </section>
       <section className="capability-grid">{capabilities.map(([icon, title, desc, preset]) => <button key={title} onClick={() => setPrompt(preset)} aria-label={title}><i className="capability-icon"><Icon name={icon} /></i><h2>{title}</h2><p>{desc}</p><span>→</span></button>)}</section>
-      <section className="how"><div className="section-heading"><i /><h2>SEC-GO 如何工作</h2><i /></div><div className="how-grid"><article><b>01</b><i>▧</i><div><h3>任务理解</h3><p>理解任务目标与上下文，提取关键要素并规划分析路径。</p></div></article><article><b>02</b><i>⌘</i><div><h3>Agent 协作</h3><p>多智能体协同检索、分析与验证，融合情报和工具能力。</p></div></article><article><b>03</b><i>▥</i><div><h3>证据与报告</h3><p>形成结构化证据链与可视化结论，输出可复用安全报告。</p></div></article></div></section>
+      <section className="how"><div className="section-heading"><i /><h2>SEC-GO 如何工作</h2><i /></div><div className="how-grid"><article><b>01</b><i><Icon name="taskAnalysis" /></i><div><h3>任务理解</h3><p>理解任务目标与上下文，提取关键要素并规划分析路径。</p></div></article><article><b>02</b><i><Icon name="agentCollaboration" /></i><div><h3>Agent 协作</h3><p>多智能体协同检索、分析与验证，融合情报和工具能力。</p></div></article><article><b>03</b><i><Icon name="evidenceReport" /></i><div><h3>证据与报告</h3><p>形成结构化证据链与可视化结论，输出可复用安全报告。</p></div></article></div></section>
     </main>
   </div>
 }

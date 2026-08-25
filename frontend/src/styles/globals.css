@@ -87,3 +87,18 @@
   position: relative;
 }
 
+.how article > i {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  overflow: visible;
+}
+
+.how article > i svg {
+  display: block;
+  width: 32px;
+  height: 32px;
+  overflow: visible;
+}

@@ -23,6 +23,9 @@ const paths: Record<string, React.ReactNode> = {
   sampleTrace: <><path d="M5 3h9l5 5v13H5zM14 3v5h5"/><circle cx="10" cy="13" r="2.5"/><path d="M12 15l3 3M15 18h4"/></>,
   cveShield: <><path d="M12 3l7 3v5c0 4.7-2.8 8.1-7 10-4.2-1.9-7-5.3-7-10V6z"/><path d="M9 10h6M10 7.5l1 2.5M14 7.5L13 10M9.5 13.5h5M12 10v6"/></>,
   aptNetwork: <><circle cx="12" cy="7" r="3"/><circle cx="5" cy="17" r="2.5"/><circle cx="19" cy="17" r="2.5"/><path d="M10 9.5L6.5 15M14 9.5l3.5 5M7.5 17h9"/></>,
+  taskAnalysis: <><path d="M4 2h9l5 5v15H4zM13 2v5h5M7 10h7M7 14h4"/><circle cx="14.5" cy="16.5" r="3.5"/><path d="M17 19l3 3"/></>,
+  agentCollaboration: <><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M9.5 7h5M7 9.5v5M17 9.5v5M9.5 17h5M8.8 8.8l6.4 6.4M15.2 8.8l-6.4 6.4"/></>,
+  evidenceReport: <><path d="M4 2h9l5 5v15H4zM13 2v5h5M7 10h7M7 14h4"/><path d="M16 11.5l4 1.5v3c0 2.2-1.5 3.9-4 5-2.5-1.1-4-2.8-4-5v-3z"/><path d="M14.2 16l1.2 1.2 2.5-2.6"/></>,
 }
 
 export function Icon({ name, ...props }: SVGProps<SVGSVGElement> & { name: string }) {
