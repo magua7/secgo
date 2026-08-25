@@ -383,6 +383,48 @@ class WebModelSettingsTests(unittest.TestCase):
         self.assertNotIn("builder-secret-key", encoded)
         self.assertNotIn("operator-secret-key", encoded)
 
+    def test_keys_status_does_not_count_injected_default_key_as_agent_key(self) -> None:
+        coding = SimpleNamespace(
+            provider="openai", baseURL="https://default.example/v1",
+            modelId="default-model", apiKey="default-key",
+        )
+        # The config loader injects the Default key into weak subscriptions for runtime fallback.
+        research = SimpleNamespace(
+            provider="openai", baseURL="https://research.example/v1",
+            modelId="research-model", apiKey="default-key",
+        )
+        cfg = SimpleNamespace(llm=SimpleNamespace(
+            subscriptions={"coding": coding, "research": research},
+            agents={"research": SimpleNamespace(subscription="coding", modelId="default-model")},
+        ))
+        raw = {
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": coding.baseURL,
+                    "modelId": coding.modelId, "apiKey": coding.apiKey,
+                },
+                "research": {
+                    "provider": "openai", "baseURL": research.baseURL,
+                    "modelId": research.modelId, "apiKey": "",
+                },
+            },
+            "agents": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(raw), encoding="utf-8")
+            with (
+                patch.object(server, "SETTINGS_FILE", settings_file),
+                patch.object(server, "get_config", return_value=cfg),
+                patch.object(server, "_config_ready", return_value=True),
+                patch.object(server, "_auth_enabled", return_value=True),
+            ):
+                response = asyncio.run(server.api_keys_status())
+
+        body = json.loads(response.body)
+        self.assertFalse(body["agents"]["research"]["has_key"])
+        self.assertEqual(body["agents"]["research"]["api_key_masked"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

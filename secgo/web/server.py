@@ -658,6 +658,7 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
     except OSError:
         raw_settings = {}
     raw_agents = raw_settings.get("agents") or {}
+    raw_subscriptions = raw_settings.get("subscriptions")
 
     def _sub_info(sub, *, enabled: bool, model: Optional[str] = None) -> Dict[str, Any]:
         key = str(sub.apiKey or "")
@@ -666,6 +667,17 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
             "provider": sub.provider,
             "base_url": sub.baseURL,
             "model": model or sub.modelId,
+            "has_key": bool(key),
+            "api_key_masked": mask(key),
+        }
+
+    def _raw_sub_info(sub: Dict[str, Any], *, enabled: bool, model: Optional[str] = None) -> Dict[str, Any]:
+        key = str(sub.get("apiKey") or "")
+        return {
+            "enabled": enabled,
+            "provider": sub.get("provider") or "openai",
+            "base_url": sub.get("baseURL") or "",
+            "model": model or sub.get("modelId") or "",
             "has_key": bool(key),
             "api_key_masked": mask(key),
         }
@@ -682,17 +694,27 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
             and loaded_agent
             and loaded_agent.subscription != "coding"
         )
-        saved_sub = cfg.llm.subscriptions.get(agent_id)
-        if agent_id == "planner" and saved_sub is None and requested_sub_name:
-            saved_sub = cfg.llm.subscriptions.get(requested_sub_name)
-        agent_status[agent_id] = (
-            _sub_info(
-                saved_sub,
+        saved_raw = (raw_subscriptions or {}).get(agent_id) if isinstance(raw_subscriptions, dict) else None
+        if agent_id == "planner" and saved_raw is None and requested_sub_name:
+            saved_raw = (raw_subscriptions or {}).get(requested_sub_name) if isinstance(raw_subscriptions, dict) else None
+        saved_loaded = cfg.llm.subscriptions.get(agent_id)
+        if agent_id == "planner" and saved_loaded is None and requested_sub_name:
+            saved_loaded = cfg.llm.subscriptions.get(requested_sub_name)
+        if saved_raw is not None:
+            agent_status[agent_id] = _raw_sub_info(
+                saved_raw,
                 enabled=enabled,
                 model=(raw_agent.get("modelId") if enabled else None),
             )
-            if saved_sub else None
-        )
+        elif raw_subscriptions is None and saved_loaded is not None:
+            # Compatibility with installations still loading LLMconfig.jsonc.
+            agent_status[agent_id] = _sub_info(
+                saved_loaded,
+                enabled=enabled,
+                model=(raw_agent.get("modelId") if enabled else None),
+            )
+        else:
+            agent_status[agent_id] = None
 
     planner_status = agent_status["planner"]
     enabled_planner = planner_status if planner_status and planner_status["enabled"] else None
