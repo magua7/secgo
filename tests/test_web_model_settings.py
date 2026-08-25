@@ -4,6 +4,7 @@ import json
 import asyncio
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,14 +19,16 @@ class WebModelSettingsTests(unittest.TestCase):
         default: dict,
         agents: dict,
         validate_keys: bool = False,
+        validator=None,
     ) -> tuple[str | None, dict | None, dict]:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = Path(temp_dir) / "settings.json"
             settings_file.write_text(json.dumps(initial), encoding="utf-8")
-            with (
-                patch.object(server, "SETTINGS_FILE", settings_file),
-                patch.object(server, "reset_config"),
-            ):
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(server, "SETTINGS_FILE", settings_file))
+                stack.enter_context(patch.object(server, "reset_config"))
+                if validator is not None:
+                    stack.enter_context(patch.object(server, "_validate_subscription", side_effect=validator))
                 error, body = server._save_model_config(default, agents, validate_keys)
             saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8"))
             return error, body, saved
@@ -87,9 +90,121 @@ class WebModelSettingsTests(unittest.TestCase):
             {},
         )
 
-        self.assertIn("掩码", error)
+        self.assertIn("默认模型", error)
         self.assertFalse(body["saved"])
         self.assertIn("掩码", body["validation"]["default"]["error"])
+        self.assertEqual(saved, initial)
+
+    def test_all_agent_ids_use_semantic_subscriptions(self) -> None:
+        default = {
+            "provider": "openai",
+            "base_url": "https://default.example/v1",
+            "model": "default-model",
+            "api_key": "default-key",
+        }
+        for agent_id in ("planner", "research", "builder", "operator"):
+            with self.subTest(agent_id=agent_id):
+                config = {
+                    "provider": f"{agent_id}-provider",
+                    "base_url": f"https://{agent_id}.example/v1",
+                    "model": f"{agent_id}-model",
+                    "api_key": f"{agent_id}-key",
+                }
+                error, body, saved = self._attempt_new_save(
+                    {},
+                    default,
+                    {agent_id: {"enabled": True, "config": config}},
+                    validator=lambda provider, url, key, model: (True, ""),
+                )
+                self.assertIsNone(error)
+                self.assertTrue(body["saved"])
+                self.assertEqual(saved["agents"][agent_id]["subscription"], agent_id)
+                self.assertEqual(saved["subscriptions"][agent_id]["apiKey"], f"{agent_id}-key")
+
+    def test_disabling_agent_preserves_subscription_and_key(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True,
+                "provider": "openai",
+                "base_url": "https://default.example/v1",
+                "model": "default-model",
+                "api_key": "default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://default.example/v1",
+                    "modelId": "default-model", "apiKey": "default-key",
+                },
+                "research": {
+                    "provider": "openai", "baseURL": "https://research.example/v1",
+                    "modelId": "research-model", "apiKey": "research-key",
+                },
+            },
+            "agents": {
+                "research": {
+                    "subscription": "research", "modelId": "research-model", "thinkingLevel": "medium",
+                }
+            },
+        }
+        error, body, saved = self._attempt_new_save(
+            initial,
+            {"provider": "openai", "base_url": "https://default.example/v1", "model": "default-model"},
+            {"research": {"enabled": False, "config": {}}},
+        )
+
+        self.assertIsNone(error)
+        self.assertTrue(body["saved"])
+        self.assertNotIn("research", saved["agents"])
+        self.assertEqual(saved["subscriptions"]["research"]["apiKey"], "research-key")
+
+    def test_one_agent_validation_failure_aborts_every_change(self) -> None:
+        initial = {
+            "llm": {
+                "enabled": True,
+                "provider": "openai",
+                "base_url": "https://old.example/v1",
+                "model": "old-default",
+                "api_key": "old-default-key",
+            },
+            "subscriptions": {
+                "coding": {
+                    "provider": "openai", "baseURL": "https://old.example/v1",
+                    "modelId": "old-default", "apiKey": "old-default-key",
+                }
+            },
+            "agents": {},
+        }
+        default = {
+            "provider": "openai", "base_url": "https://new.example/v1",
+            "model": "new-default", "api_key": "new-default-key",
+        }
+        agents = {
+            agent_id: {
+                "enabled": True,
+                "config": {
+                    "provider": "openai", "base_url": f"https://{agent_id}.example/v1",
+                    "model": "bad-research" if agent_id == "research" else f"{agent_id}-model",
+                    "api_key": f"{agent_id}-key",
+                },
+            }
+            for agent_id in ("planner", "research", "builder", "operator")
+        }
+
+        error, body, saved = self._attempt_new_save(
+            initial,
+            default,
+            agents,
+            True,
+            validator=lambda provider, url, key, model: (False, "HTTP 401") if model == "bad-research" else (True, ""),
+        )
+
+        self.assertIn("Research", error)
+        self.assertFalse(body["saved"])
+        self.assertTrue(body["validation"]["default"]["ok"])
+        self.assertTrue(body["validation"]["planner"]["ok"])
+        self.assertFalse(body["validation"]["research"]["ok"])
+        self.assertTrue(body["validation"]["builder"]["ok"])
+        self.assertTrue(body["validation"]["operator"]["ok"])
         self.assertEqual(saved, initial)
 
     def _save(
@@ -104,6 +219,7 @@ class WebModelSettingsTests(unittest.TestCase):
             with (
                 patch.object(server, "SETTINGS_FILE", settings_file),
                 patch.object(server, "reset_config"),
+                patch.object(server, "_validate_subscription", return_value=(True, "")),
             ):
                 error, body = server._save_model_config(default, planner, False)
             self.assertIsNone(error)

@@ -38,7 +38,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, Cookie
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from ..config.config import SETTINGS_FILE, get_config, reset_config
+from ..config.config import DEFAULT_AGENT_THINKING, SETTINGS_FILE, get_config, reset_config
 from ..config.jsonc import parse_jsonc, stringify_jsonc
 from ..kernel.handoff_engine import (
     cancel_waiting_input,
@@ -438,6 +438,15 @@ def _clean_provider(provider: str) -> str:
     return (provider or "openai").strip() or "openai"
 
 
+MODEL_AGENT_IDS = ("planner", "research", "builder", "operator")
+MODEL_AGENT_LABELS = {
+    "planner": "Planner",
+    "research": "Research",
+    "builder": "Builder",
+    "operator": "Operator",
+}
+
+
 class _KeySetupReq(BaseModel):
     default: Optional[Dict[str, Any]] = None
     agents: Optional[Dict[str, Dict[str, Any]]] = None
@@ -455,25 +464,7 @@ class _AttachmentUploadReq(BaseModel):
 def _save_model_config(default_cfg: Optional[Dict[str, Any]],
                        agent_configs: Optional[Dict[str, Any]],
                        validate_keys: bool) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """把 default/planner 配置写入 settings.json，返回 (错误信息, 成功响应体)。"""
-    def _failure(config_id: str, message: str) -> tuple[str, Dict[str, Any]]:
-        return message, {
-            "ok": False,
-            "saved": False,
-            "validation": {config_id: {"ok": False, "error": message}},
-            "error": message,
-        }
-
-    def _check(cfg: Dict[str, Any], label: str, stored_key: str) -> tuple[Optional[str], str]:
-        if not cfg.get("base_url") or not cfg.get("model"):
-            return f"{label}：base_url 与 model 不能为空", ""
-        submitted_key = str(cfg.get("api_key") or "").strip()
-        if "*" in submitted_key:
-            return f"{label}：API Key 不能使用掩码值", ""
-        effective_key = submitted_key or stored_key
-        if not effective_key:
-            return f"{label}：API Key 不能为空", ""
-        return None, effective_key
+    """Validate an in-memory Default/Agent candidate set, then persist it as one unit."""
 
     # 先读取持久化源，以便空输入安全复用真实 Key；绝不从掩码状态反推凭据。
     existing = {}
@@ -489,79 +480,137 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
                 or (existing.get("llm") or {}).get("api_key")
                 or ""
             )
-        return str(((existing.get("subscriptions") or {}).get(config_id) or {}).get("apiKey") or "")
+        subscriptions = existing.get("subscriptions") or {}
+        saved = (subscriptions.get(config_id) or {}).get("apiKey")
+        if saved:
+            return str(saved)
+        # Legacy Planner configurations may still point at a differently named subscription.
+        if config_id == "planner":
+            planner_agent = (existing.get("agents") or {}).get("planner") or {}
+            legacy_name = planner_agent.get("subscription") or ""
+            return str((subscriptions.get(legacy_name) or {}).get("apiKey") or "")
+        return ""
 
-    planner_cfg: Optional[Dict[str, Any]] = None
-    if agent_configs:
-        if "planner" in agent_configs and isinstance(agent_configs.get("planner"), dict):
-            planner_request = agent_configs["planner"]
-            if "enabled" in planner_request:
-                if planner_request.get("enabled"):
-                    planner_cfg = dict(planner_request.get("config") or {})
+    def _normalize_agents() -> tuple[Dict[str, Dict[str, Any]], set[str]]:
+        requests = {
+            agent_id: {"enabled": False, "config": {}}
+            for agent_id in MODEL_AGENT_IDS
+        }
+        # A missing/flat second argument is the legacy Default+Planner contract.
+        if agent_configs is None:
+            return requests, {"planner"}
+        if "base_url" in agent_configs or "model" in agent_configs:
+            requests["planner"] = {"enabled": True, "config": dict(agent_configs)}
+            return requests, {"planner"}
+        for agent_id in MODEL_AGENT_IDS:
+            entry = agent_configs.get(agent_id)
+            if not isinstance(entry, dict):
+                continue
+            if "enabled" in entry:
+                requests[agent_id] = {
+                    "enabled": bool(entry.get("enabled")),
+                    "config": dict(entry.get("config") or {}),
+                }
             else:
-                planner_cfg = planner_request
-        elif "base_url" in agent_configs or "model" in agent_configs:
-            # 兼容旧版调用：第二个参数直接是 Planner 配置。
-            planner_cfg = agent_configs
+                requests[agent_id] = {"enabled": True, "config": dict(entry)}
+        return requests, set(MODEL_AGENT_IDS)
 
-    if default_cfg is None:
-        return _failure("default", "必须配置默认模型（default）")
+    normalized_agents, managed_agent_ids = _normalize_agents()
+    configs: Dict[str, Dict[str, Any]] = {"default": dict(default_cfg or {})}
+    for agent_id in MODEL_AGENT_IDS:
+        if normalized_agents[agent_id]["enabled"]:
+            configs[agent_id] = normalized_agents[agent_id]["config"]
 
-    err, default_key = _check(default_cfg, "默认模型", _stored_key("default"))
-    if err:
-        return _failure("default", err)
-    default_cfg = {**default_cfg, "api_key": default_key}
+    validation: Dict[str, Dict[str, Any]] = {}
+    candidates: Dict[str, Dict[str, Any]] = {}
+    has_new_key: Dict[str, bool] = {}
 
-    planner_sub_name = None
-    if planner_cfg is not None:
-        err, planner_key = _check(planner_cfg, "Planner 模型", _stored_key("planner"))
-        if err:
-            return _failure("planner", err)
-        planner_cfg = {**planner_cfg, "api_key": planner_key}
-        planner_sub_name = "planner"
+    for config_id, cfg in configs.items():
+        label = "默认模型" if config_id == "default" else f"{MODEL_AGENT_LABELS[config_id]} 模型"
+        provider = _clean_provider(str(cfg.get("provider") or "openai"))
+        base_url = str(cfg.get("base_url") or "").strip()
+        model = str(cfg.get("model") or "").strip()
+        submitted_key = str(cfg.get("api_key") or "").strip()
+        error = None
+        if not base_url or not model:
+            error = f"{label}：base_url 与 model 不能为空"
+        elif "*" in submitted_key:
+            error = f"{label}：API Key 不能使用掩码值"
+        effective_key = submitted_key or _stored_key(config_id)
+        if error is None and not effective_key:
+            error = f"{label}：API Key 不能为空"
 
-    if validate_keys:
-        ok, msg = _validate_subscription(default_cfg.get("provider", "openai"), default_cfg["base_url"], default_cfg["api_key"], default_cfg["model"])
+        has_new_key[config_id] = bool(submitted_key)
+        candidates[config_id] = {
+            "provider": provider,
+            "baseURL": base_url,
+            "modelId": model,
+            "apiKey": effective_key,
+        }
+        validation[config_id] = {"ok": error is None, "error": error}
+
+    # A replacement candidate is always validated. Reused working keys follow validate_keys.
+    for config_id, candidate in candidates.items():
+        if not validation[config_id]["ok"]:
+            continue
+        if not (validate_keys or has_new_key[config_id]):
+            continue
+        ok, msg = _validate_subscription(
+            candidate["provider"], candidate["baseURL"],
+            candidate["apiKey"], candidate["modelId"],
+        )
         if not ok:
-            return f"默认模型校验失败 - {msg}", None
-        if planner_cfg is not None:
-            ok, msg = _validate_subscription(planner_cfg.get("provider", "openai"), planner_cfg["base_url"], planner_cfg["api_key"], planner_cfg["model"])
-            if not ok:
-                return f"Planner 模型校验失败 - {msg}", None
+            label = "默认模型" if config_id == "default" else f"{MODEL_AGENT_LABELS[config_id]} 模型"
+            prefix = "新 API Key 校验失败" if has_new_key[config_id] else "校验失败"
+            validation[config_id] = {"ok": False, "error": f"{label}{prefix}：{msg}"}
 
-    default_provider = _clean_provider(default_cfg.get("provider", "openai"))
-    default_sub = {
-        "provider": default_provider,
-        "baseURL": default_cfg["base_url"].strip(),
-        "modelId": default_cfg["model"].strip(),
-        "apiKey": default_cfg["api_key"].strip(),
-    }
+    failed_ids = [config_id for config_id, result in validation.items() if not result["ok"]]
+    if failed_ids:
+        first = failed_ids[0]
+        failed_label = "默认模型" if first == "default" else f"{MODEL_AGENT_LABELS[first]} 配置"
+        global_error = f"模型配置未保存，请检查 {failed_label}"
+        return global_error, {
+            "ok": False,
+            "saved": False,
+            "validation": validation,
+            "error": global_error,
+        }
+
+    default_sub = candidates["default"]
+    default_provider = default_sub["provider"]
 
     # 合并 subscriptions：保留既有订阅，写入 default（coding）
     subs = dict(existing.get("subscriptions") or {})
     subs["coding"] = default_sub
 
     agents = dict(existing.get("agents") or {})
-    if planner_cfg is not None:
-        subs[planner_sub_name] = {
-            "provider": _clean_provider(planner_cfg.get("provider", "openai")),
-            "baseURL": planner_cfg["base_url"].strip(),
-            "modelId": planner_cfg["model"].strip(),
-            "apiKey": planner_cfg["api_key"].strip(),
-        }
-        agents["planner"] = {"subscription": planner_sub_name, "modelId": planner_cfg["model"].strip(), "thinkingLevel": "medium"}
-    else:
-        # 用户显式清空 Planner → 删除 agent 与专用订阅（避免残留 Key 冗余存储）
-        agents.pop("planner", None)
-        subs.pop("planner", None)
+    for agent_id in managed_agent_ids:
+        request = normalized_agents[agent_id]
+        if request["enabled"]:
+            subs[agent_id] = candidates[agent_id]
+            previous = agents.get(agent_id) or {}
+            agents[agent_id] = {
+                "subscription": agent_id,
+                "modelId": candidates[agent_id]["modelId"],
+                "thinkingLevel": previous.get("thinkingLevel") or DEFAULT_AGENT_THINKING[agent_id],
+            }
+            continue
+
+        # Preserve a legacy Planner subscription under its semantic name before unbinding it.
+        if agent_id == "planner" and "planner" not in subs:
+            previous = agents.get("planner") or {}
+            legacy_name = previous.get("subscription") or ""
+            if legacy_name and legacy_name != "coding" and legacy_name in subs:
+                subs["planner"] = dict(subs[legacy_name])
+        agents.pop(agent_id, None)
 
     # 只更新 llm 相关键，保留 web / run_limits / 既有字段（timeout_seconds、max_response_bytes 等）
     llm_section = dict(existing.get("llm") or {})
     llm_section["enabled"] = True
     llm_section["provider"] = default_provider
-    llm_section["base_url"] = default_cfg["base_url"].strip()
-    llm_section["api_key"] = default_cfg["api_key"].strip()
-    llm_section["model"] = default_cfg["model"].strip()
+    llm_section["base_url"] = default_sub["baseURL"]
+    llm_section["api_key"] = default_sub["apiKey"]
+    llm_section["model"] = default_sub["modelId"]
 
     updated = dict(existing)
     updated["llm"] = llm_section
@@ -572,12 +621,10 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
     try:
         SETTINGS_FILE.write_text(stringify_jsonc(updated), encoding="utf-8")
     except OSError as e:
-        return f"写入 settings.json 失败：{e}", None
+        message = f"写入 settings.json 失败：{e}"
+        return message, {"ok": False, "saved": False, "validation": validation, "error": message}
 
     reset_config()  # 下次 get_config() 重新加载，新配置立即生效
-    validation = {"default": {"ok": True, "error": None}}
-    if planner_cfg is not None:
-        validation["planner"] = {"ok": True, "error": None}
     return None, {"ok": True, "saved": True, "next": "/", "validation": validation}
 
 
