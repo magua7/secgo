@@ -1,11 +1,11 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { HomePage } from './HomePage'
 
 describe('HomePage', () => {
   it('fills the prompt from a capability preset', async () => {
-    render(<HomePage theme="light" onThemeToggle={vi.fn()} onOpenSettings={vi.fn()} />)
+    render(<HomePage />)
     await userEvent.click(screen.getByRole('button', { name: /恶意域名研判/ }))
     expect((screen.getByLabelText('安全任务') as HTMLTextAreaElement).value).toContain('域名')
     expect(screen.queryByRole('button', { name: '历史会话' })).not.toBeInTheDocument()
