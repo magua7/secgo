@@ -1,5 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiRequest, buildSetupPayload, resolvePostLoginDestination, sendChat, uploadAttachment, validateSetupForSave } from './api'
+import { ApiError, apiRequest, buildSetupPayload, resolvePostLoginDestination, saveSetup, sendChat, uploadAttachment, validateSetupForSave } from './api'
+
+const modelInput = (model: string, apiKey = '') => ({
+  provider: 'openai', base_url: `https://${model}.example/v1`, model, api_key: apiKey,
+})
+
+const agentInputs = () => ({
+  planner: { enabled: false, config: modelInput('planner') },
+  research: { enabled: false, config: modelInput('research') },
+  builder: { enabled: false, config: modelInput('builder') },
+  operator: { enabled: false, config: modelInput('operator') },
+})
+
+const keyStatus = (hasKey: boolean) => ({
+  auth_enabled: true,
+  ready: true,
+  default: { ...modelInput('default'), enabled: true, has_key: hasKey, api_key_masked: hasKey ? 'def***key' : '' },
+  agents: {
+    planner: null,
+    research: null,
+    builder: null,
+    operator: null,
+  },
+})
 
 describe('api service', () => {
   beforeEach(() => vi.restoreAllMocks())
@@ -19,7 +42,8 @@ describe('api service', () => {
   it('omits unchanged masked keys from setup payload', () => {
     const payload = buildSetupPayload({ provider: 'openai', base_url: 'https://api.test/v1', model: 'm', api_key: '' }, null, true)
     expect(payload.default).not.toHaveProperty('api_key')
-    expect(payload.planner).toBeNull()
+    expect(payload.agents.planner.enabled).toBe(false)
+    expect(payload.agents.planner.config).not.toHaveProperty('api_key')
   })
 
   it('preserves an arbitrary OpenAI-compatible provider label', () => {
@@ -56,5 +80,42 @@ describe('api service', () => {
   it('requires keys when saving because masked values are not returned to the browser', () => {
     expect(validateSetupForSave({ provider: 'openai', base_url: 'https://api.test/v1', model: 'm', api_key: '' }, null)).toContain('API Key')
     expect(validateSetupForSave({ provider: 'openai', base_url: 'https://api.test/v1', model: 'm', api_key: 'secret' }, null)).toBeNull()
+  })
+
+  it('allows an empty Default key when backend status confirms a stored key', () => {
+    expect(validateSetupForSave(modelInput('default'), agentInputs(), keyStatus(true))).toBeNull()
+  })
+
+  it('requires a key for a first-time enabled Agent override', () => {
+    const agents = agentInputs()
+    agents.research.enabled = true
+    expect(validateSetupForSave(modelInput('default'), agents, keyStatus(true))).toContain('Research')
+  })
+
+  it('serializes all Agent enabled states and omits empty keys', () => {
+    const agents = agentInputs()
+    agents.planner.enabled = true
+    agents.planner.config.api_key = ' planner-secret '
+    const payload = buildSetupPayload(modelInput('default'), agents, true)
+
+    expect(payload.default).not.toHaveProperty('api_key')
+    expect(payload.agents.planner).toEqual(expect.objectContaining({
+      enabled: true,
+      config: expect.objectContaining({ api_key: 'planner-secret' }),
+    }))
+    expect(payload.agents.research.enabled).toBe(false)
+    expect(payload.agents.research.config).not.toHaveProperty('api_key')
+  })
+
+  it('preserves structured validation details on an API error', async () => {
+    vi.spyOn(window, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      saved: false,
+      validation: { research: { ok: false, error: 'HTTP 401' } },
+      error: '模型配置未保存',
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } }))
+
+    await expect(saveSetup(buildSetupPayload(modelInput('default', 'key'), agentInputs(), true)))
+      .rejects.toMatchObject({ body: { saved: false, validation: { research: { ok: false } } } })
   })
 })

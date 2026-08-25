@@ -9,13 +9,22 @@ export interface ModelConfig {
   api_key_masked?: string
 }
 
+export type AgentId = 'planner' | 'research' | 'builder' | 'operator'
+export type ConfigId = 'default' | AgentId
+
+export interface ModelKeyStatus extends ModelConfig {
+  enabled: boolean
+  has_key: boolean
+}
+
 export interface KeysStatus {
   auth_enabled: boolean
   ready: boolean
-  has_default: boolean
-  default: ModelConfig | null
-  has_planner: boolean
-  planner: ModelConfig | null
+  has_default?: boolean
+  default: ModelKeyStatus | null
+  agents: Record<AgentId, ModelKeyStatus | null>
+  has_planner?: boolean
+  planner?: ModelKeyStatus | null
 }
 
 export interface ModelConfigInput {
@@ -25,10 +34,30 @@ export interface ModelConfigInput {
   api_key?: string
 }
 
+export interface AgentOverrideInput {
+  enabled: boolean
+  config: ModelConfigInput
+}
+
+export type AgentOverrideInputs = Record<AgentId, AgentOverrideInput>
+
 export interface SetupPayload {
   default: ModelConfigInput
-  planner: ModelConfigInput | null
+  agents: AgentOverrideInputs
   validate_keys: boolean
+}
+
+export interface ValidationResult {
+  ok: boolean
+  error: string | null
+}
+
+export interface SetupResponse {
+  ok: boolean
+  saved: boolean
+  next?: string
+  error?: string
+  validation: Partial<Record<ConfigId, ValidationResult>>
 }
 
 export interface SessionsResponse {

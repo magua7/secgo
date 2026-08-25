@@ -1,8 +1,8 @@
-import type { ChatResponse, KeysStatus, LoginResponse, ModelConfigInput, SessionsResponse, SetupPayload } from '../types/api'
+import type { AgentId, AgentOverrideInputs, ChatResponse, KeysStatus, LoginResponse, ModelConfigInput, SessionsResponse, SetupPayload, SetupResponse } from '../types/api'
 import type { SessionMessagesResponse } from '../types/session'
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number, public readonly redirectTo: string | null = null) {
+  constructor(message: string, public readonly status: number, public readonly redirectTo: string | null = null, public readonly body: unknown = null) {
     super(message)
     this.name = 'ApiError'
   }
@@ -12,11 +12,13 @@ export async function apiRequest<T>(url: string, options: RequestInit = {}): Pro
   const response = await window.fetch(url, { credentials: 'same-origin', ...options })
   if (!response.ok) {
     let message = `请求失败（${response.status}）`
+    let responseBody: unknown = null
     try {
-      const body = await response.json() as { error?: string; detail?: string }
+      responseBody = await response.json()
+      const body = responseBody as { error?: string; detail?: string }
       message = body.error ?? body.detail ?? message
     } catch { /* non-JSON response */ }
-    throw new ApiError(message, response.status, response.status === 401 ? '/login' : null)
+    throw new ApiError(message, response.status, response.status === 401 ? '/login' : null, responseBody)
   }
   return response.json() as Promise<T>
 }
@@ -77,25 +79,51 @@ export const sendChat = (message: string, sessionId?: string, attachmentIds?: st
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, sessionId, attachments: attachmentIds ?? [] }),
 })
 
-export function buildSetupPayload(defaultConfig: ModelConfigInput, planner: ModelConfigInput | null, validateKeys: boolean): SetupPayload {
+const AGENT_IDS: AgentId[] = ['planner', 'research', 'builder', 'operator']
+
+const emptyAgentInputs = (): AgentOverrideInputs => ({
+  planner: { enabled: false, config: { provider: '', base_url: '', model: '', api_key: '' } },
+  research: { enabled: false, config: { provider: '', base_url: '', model: '', api_key: '' } },
+  builder: { enabled: false, config: { provider: '', base_url: '', model: '', api_key: '' } },
+  operator: { enabled: false, config: { provider: '', base_url: '', model: '', api_key: '' } },
+})
+
+const isAgentInputs = (value: AgentOverrideInputs | ModelConfigInput | null): value is AgentOverrideInputs =>
+  Boolean(value && 'planner' in value && typeof value.planner === 'object' && 'enabled' in value.planner)
+
+export function buildSetupPayload(defaultConfig: ModelConfigInput, agentValues: AgentOverrideInputs | ModelConfigInput | null, validateKeys: boolean): SetupPayload {
   const clean = (config: ModelConfigInput): ModelConfigInput => {
     const result: ModelConfigInput = { provider: config.provider.trim() || 'openai', base_url: config.base_url.trim(), model: config.model.trim() }
     if (config.api_key?.trim()) result.api_key = config.api_key.trim()
     return result
   }
-  return { default: clean(defaultConfig), planner: planner ? clean(planner) : null, validate_keys: validateKeys }
+  const source = isAgentInputs(agentValues) ? agentValues : emptyAgentInputs()
+  if (agentValues && !isAgentInputs(agentValues)) source.planner = { enabled: true, config: agentValues }
+  const agents = Object.fromEntries(AGENT_IDS.map((agentId) => [
+    agentId,
+    { enabled: source[agentId].enabled, config: clean(source[agentId].config) },
+  ])) as AgentOverrideInputs
+  return { default: clean(defaultConfig), agents, validate_keys: validateKeys }
 }
 
-export const saveSetup = (payload: SetupPayload): Promise<{ ok: boolean; next: string }> => apiRequest('/api/setup-keys', {
+export const saveSetup = (payload: SetupPayload): Promise<SetupResponse> => apiRequest('/api/setup-keys', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
 })
 
 export const resolvePostLoginDestination = (_ready: boolean): '/' => '/'
 
-export function validateSetupForSave(defaultConfig: ModelConfigInput, planner: ModelConfigInput | null): string | null {
+export function validateSetupForSave(defaultConfig: ModelConfigInput, agentValues: AgentOverrideInputs | ModelConfigInput | null, status?: KeysStatus | null): string | null {
   if (!defaultConfig.base_url.trim() || !defaultConfig.model.trim()) return '请完整填写默认模型配置'
-  if (!defaultConfig.api_key?.trim()) return '保存配置时必须重新输入默认模型 API Key'
-  if (planner && (!planner.base_url.trim() || !planner.model.trim() || !planner.api_key?.trim())) return '启用 Planner 专用模型时必须完整填写配置和 API Key'
+  if (!defaultConfig.api_key?.trim() && !status?.default?.has_key) return '首次配置默认模型时必须输入 API Key'
+  const agents = isAgentInputs(agentValues) ? agentValues : emptyAgentInputs()
+  if (agentValues && !isAgentInputs(agentValues)) agents.planner = { enabled: true, config: agentValues }
+  for (const agentId of AGENT_IDS) {
+    const entry = agents[agentId]
+    if (!entry.enabled) continue
+    const label = agentId.charAt(0).toUpperCase() + agentId.slice(1)
+    if (!entry.config.base_url.trim() || !entry.config.model.trim()) return `请完整填写 ${label} 专用模型配置`
+    if (!entry.config.api_key?.trim() && !status?.agents?.[agentId]?.has_key) return `首次启用 ${label} 专用模型时必须输入 API Key`
+  }
   return null
 }
 
