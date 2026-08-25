@@ -43,3 +43,6 @@ jbgs/
 
 # 编辑器本地配置
 .claude/settings.local.json
+
+# Isolated feature worktrees
+/.worktrees/
