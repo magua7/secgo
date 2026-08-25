@@ -1,0 +1,36 @@
+{
+  // SEC-GO 模型配置示例模板（复制为 settings.json 使用，含密钥勿提交 git）
+  // llm / subscriptions / agents 为模型配置；web 为 Web 登录与端口；run_limits 为任务预算
+  "llm": {
+    "enabled": true,
+    "provider": "openai-compatible",
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-v4-flash",
+    "timeout_seconds": 60,
+    "max_response_bytes": 2000000
+  },
+  "subscriptions": {
+    "coding": {
+      "provider": "openai-compatible",
+      "baseURL": "https://api.deepseek.com/v1",
+      "modelId": "deepseek-v4-flash",
+      "apiKey": ""
+    }
+  },
+  "agents": {},
+  "web": {
+    // 固定 Web 访问密码为 secgo123，其 SHA-256 hash 如下
+    "admin_password_hash": "852fe90d33f87b285b3eeb6655f74266cddf66329ab6be5a28a98669003b7776",
+    // 明文密码不使用
+    "admin_password": "",
+    // Cookie 签名密钥：python -c "import secrets;print(secrets.token_hex(32))"
+    "secret_key": "dev-insecure-secret-change-me-xxxxxxxxxxxxxxxxx",
+    "port": 8381
+  },
+  "run_limits": {
+    "max_steps": 50,
+    "max_replans": 2,
+    "max_seconds": 600
+  }
+}
