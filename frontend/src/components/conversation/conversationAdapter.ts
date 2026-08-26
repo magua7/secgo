@@ -182,3 +182,20 @@ export function persistedTurnToConversationTurn(turn: PersistedTurn): Conversati
 export function persistedTurnsToConversationTurns(turns: PersistedTurn[]): ConversationTurn[] {
   return turns.map(persistedTurnToConversationTurn)
 }
+
+// 底部 TaskStatusBar 选择「当前任务状态」：
+// - 有 liveTurn：只看当前 live turn（是否显示由 hasAgentTaskSignals 决定），绝不回退到历史 agent task；
+// - 无 liveTurn：只看「最新」persisted turn，仅当它是 agent_task 且带 execution 时才返回其 snapshot；
+//   最新 turn 是 direct_response 时返回 null（隐藏状态栏），绝不向前搜索任意最近的 agent_task。
+export function selectTaskExecution(
+  hasLiveTurn: boolean,
+  liveExecution: ExecutionState | null,
+  persistedTurns: PersistedTurn[],
+): ExecutionState | null {
+  if (hasLiveTurn && liveExecution) return liveExecution
+  const latest = persistedTurns[persistedTurns.length - 1]
+  if (latest && latest.kind === 'agent_task' && latest.execution) {
+    return snapshotToExecutionState(latest.execution)
+  }
+  return null
+}

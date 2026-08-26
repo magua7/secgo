@@ -125,3 +125,13 @@
 .model-settings-section .key-mask{white-space:nowrap}
 @media(max-width:760px){.agent-override-card .agent-identity{grid-template-columns:1fr}.agent-override-card .agent-identity>small{white-space:normal}.model-settings-section .field-label-row{align-items:flex-start;flex-direction:column}.model-settings-section .field-label-row .key-mask{margin-left:0}}
 .user-attachments{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}.attachment-card{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--bg-soft);white-space:normal}.attachment-card svg{width:16px;flex:0 0 auto;color:var(--text-secondary)}.attachment-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;font-weight:600}.attachment-card small{color:var(--text-faint);font-size:10px;white-space:nowrap}.history-badge{margin-left:auto;padding:2px 8px;border:1px solid var(--border-subtle);border-radius:10px;color:var(--text-faint);font-size:10px;white-space:nowrap}.resource-group{margin-bottom:12px;border:1px solid var(--border-subtle);border-radius:8px;padding:0 10px;background:var(--bg-soft)}.resource-group>summary{display:flex;align-items:center;justify-content:space-between;padding:10px 0;cursor:pointer}.resource-group>summary strong{font-weight:600}.resource-group>summary small{color:var(--text-faint)}.resource-invocation{padding:8px 0;border-top:1px solid var(--border-subtle);color:var(--text-secondary);font-size:12px}
+.task-status-bar{display:flex;align-items:center;gap:9px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-bottom:0;padding:4px 12px;min-height:30px;font-size:11px;color:var(--text-secondary);overflow:hidden}
+.task-status-bar+.composer-wrap{border-radius:0 0 11px 11px}
+.task-status-bar .tsb-mark i{font-style:normal;color:var(--accent-amber)}
+.task-status-bar.terminal .tsb-mark i{color:var(--text-secondary)}
+.task-status-bar .tsb-status{color:var(--accent-amber);white-space:nowrap;font-weight:600}
+.task-status-bar.terminal .tsb-label{color:var(--text-secondary);white-space:nowrap;font-weight:600}
+.task-status-bar .tsb-agent{color:var(--text-primary);white-space:nowrap;font-weight:600}
+.task-status-bar .tsb-activity{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task-status-bar .tsb-elapsed{color:var(--text-faint);white-space:nowrap;font:10px var(--font-mono)}
+.task-status-bar .tsb-stats{color:var(--text-faint);white-space:nowrap}

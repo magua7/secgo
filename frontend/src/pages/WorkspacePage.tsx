@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { useExecutionRegistry } from '../hooks/useExecutionRegistry'
 import { usePanelPreferences } from '../hooks/preferences'
+import { useElapsedTime } from '../hooks/useElapsedTime'
 import { cancelSession, deleteSession, getSessionMessages, getSessions, handleApiError, renameSession, sendChat } from '../services/api'
 import type { SessionSummary, PersistedTurn } from '../types/session'
 import type { ExecutionTraceTab } from '../types/executionTrace'
 import type { ConversationTurn } from '../types/conversation'
+import type { ExecutionState } from '../types/execution'
 import type { MessageAttachment } from '../types/attachment'
 import { ConversationFeed } from '../components/conversation/ConversationFeed'
 import { Composer } from '../components/conversation/Composer'
 import { TasksDock } from '../components/execution/TasksDock'
+import { TaskStatusBar } from '../components/execution/TaskStatusBar'
 import { Sidebar } from '../components/layout/Sidebar'
 import { RightPanel } from '../components/layout/RightPanel'
 import { executionSnapshotToTraceView, liveExecutionToTrace } from '../components/layout/executionTraceAdapter'
-import { liveExecutionToTurn, persistedTurnsToConversationTurns } from '../components/conversation/conversationAdapter'
+import { hasAgentTaskSignals, liveExecutionToTurn, persistedTurnsToConversationTurns, selectTaskExecution } from '../components/conversation/conversationAdapter'
 import { isNearBottom, shouldFollowStreamUpdate } from '../utils/autoFollow'
 import { executionForTurnSubmission } from '../utils/turnSubmission'
 
@@ -57,7 +60,17 @@ export function WorkspacePage() {
     if (lastAgent?.execution) return executionSnapshotToTraceView(lastAgent.execution)
     return liveExecutionToTrace(selectedState)
   }, [liveTurn, liveTurnId, selectedState, persistedTurns])
-  const activeTitle = sessions.find((session) => session.id === selectedId)?.title || '新建任务'
+  // 底部 Agent Console 的「当前任务」状态：有 liveTurn 只看它；否则只看最新 persisted turn（不回退历史 agent task）
+  const taskExecution = useMemo<ExecutionState | null>(
+    () => selectTaskExecution(Boolean(liveTurn && liveTurnId), displayedExecution, persistedTurns),
+    [liveTurn, liveTurnId, displayedExecution, persistedTurns],
+  )
+  const showTaskStatus = useMemo(() => Boolean(taskExecution && hasAgentTaskSignals(taskExecution)), [taskExecution])
+  const consoleElapsed = useElapsedTime(
+    taskExecution?.startedAt ?? null,
+    taskExecution?.endedAt ?? null,
+    taskExecution?.status === 'running' || taskExecution?.status === 'loading',
+  )
   const workspaceColumns = { '--workspace-left': leftMode === 'expanded' ? '250px' : '0px', '--workspace-right': rightVisible ? '340px' : '0px' } as CSSProperties
 
   const loadSessions = async () => { try { setSessions((await getSessions()).sessions) } catch (reason) { setError(handleApiError(reason)) } }
@@ -190,7 +203,7 @@ export function WorkspacePage() {
       <main className="workspace-center">
       <div className="workspace-scroll" ref={feedRef} onScroll={onFeedScroll}>{loading ? <div className="loading-state">正在加载会话…</div> : <ConversationFeed turns={displayTurns} liveTurnId={liveTurnId} onToggleExecution={() => { if (selectedId) toggleSession(selectedId) }} />}{error && <div className="workspace-error">{error}</div>}</div>
       {showLatest && <button className="return-latest" onClick={returnToLatest}>↓ 回到最新</button>}
-      <div className="workspace-input"><TasksDock tasks={displayedExecution.tasks} status={displayedExecution.status} /><Composer running={running} onSend={send} onStop={stop} /></div>
+      <div className="workspace-input"><TasksDock tasks={displayedExecution.tasks} status={displayedExecution.status} />{showTaskStatus && taskExecution && <TaskStatusBar status={taskExecution.status} phase={taskExecution.phase} activeAgent={taskExecution.activeAgent} currentActivity={taskExecution.currentActivity} elapsedMs={consoleElapsed} toolCount={taskExecution.tools.length} evidenceCount={taskExecution.evidence.length} />}<Composer running={running} onSend={send} onStop={stop} /></div>
       </main>
       <div className={`panel-shell right-panel-shell ${rightVisible ? 'visible' : 'hidden'}`}><button className="panel-edge-handle right" onClick={toggleRightPanel} aria-label={rightVisible ? '折叠执行面板' : '展开执行面板'}>{rightVisible ? '›' : '‹'}</button>{rightVisible && <RightPanel view={rightTrace} tab={rightTab} onTabChange={setRightTab} />}</div>
     </div>
