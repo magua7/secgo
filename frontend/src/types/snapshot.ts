@@ -36,7 +36,7 @@ export interface SnapshotTimelineItem {
 export interface RunSnapshot {
   run_id: string
   session_id: string
-  turn_id: number
+  turn_id: string
   status: SnapshotStatus
   phase: SnapshotPhase
   reason: string

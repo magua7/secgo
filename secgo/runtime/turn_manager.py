@@ -48,7 +48,7 @@ class TurnRecorder:
         self.session_id = session_id
         self.turn_id = turn_id
         self.on_finalize = on_finalize
-        self.snapshot = RunSnapshotRecorder(session_id, run_id=turn_id)
+        self.snapshot = RunSnapshotRecorder(session_id, run_id=turn_id, turn_id=turn_id)
         self._finalized = False
         self._subscriptions = []
         for event_name in _TURN_EVENTS:

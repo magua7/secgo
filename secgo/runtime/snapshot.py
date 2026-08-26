@@ -83,12 +83,14 @@ def _is_readable_narrative(text: str) -> bool:
 
 
 class RunSnapshotRecorder:
-    """累积一次 run 的可展示状态；支持从既有 snapshot 续跑（会话续聊）。"""
+    """累积一次 run 的可展示状态（事件 → 持久化 RunSnapshot）。"""
 
-    def __init__(self, session_id: str, run_id: Optional[str] = None) -> None:
+    def __init__(self, session_id: str, run_id: Optional[str] = None, turn_id: Optional[str] = None) -> None:
         self.run_id = run_id or str(uuid.uuid4())
         self.session_id = session_id
-        self.turn_id = 1
+        # turn_id 必须是 conversation_turns.id（真实 Turn UUID string），绝不写死为 1 / sequence / index。
+        # run≈turn 时 run_id 即 turn_id；独立 runId 场景仍可区分。
+        self.turn_id = turn_id or self.run_id
         self.status = "running"
         self.phase = "planning"
         self.reason = ""

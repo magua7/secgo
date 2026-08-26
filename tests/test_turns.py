@@ -106,6 +106,25 @@ class TurnPersistenceTests(unittest.TestCase):
         # 无 conversation_turns 的旧 session 由 server 层还原（见 test_snapshot_persistence）
         self.assertEqual(self.manager.list_turns("s1"), [])
 
+    def test_snapshot_turn_id_is_real_turn_uuid_and_round_trips(self):
+        # 真实 Turn UUID（string），snapshot.turn_id 必须等于它；数据库重载后仍一致
+        self.manager.create_turn("s1", "abc-123-456", 1, {"text": "你好", "attachments": []}, "direct_response", "running")
+        turn_manager.start_turn("s1", "abc-123-456")
+        _emit("engine:start", {})
+        _emit("engine:text", {"agent_id": "builder", "text": "# 最终报告"})
+        _emit("engine:end", {"reason": "completed", "total_steps": 1})
+        turn = self.manager.list_turns("s1")[0]
+        self.assertEqual(turn["execution"]["turn_id"], "abc-123-456")
+        self.assertIsInstance(turn["execution"]["turn_id"], str)
+        self.assertNotIn(turn["execution"]["turn_id"], ("1", 1))
+        # 重新打开一个 SessionManager 读库，模拟刷新后重新加载
+        reloaded = SessionManager(self.db)
+        try:
+            turn_reloaded = reloaded.list_turns("s1")[0]
+            self.assertEqual(turn_reloaded["execution"]["turn_id"], "abc-123-456")
+        finally:
+            reloaded.close()
+
 
 if __name__ == "__main__":
     unittest.main()

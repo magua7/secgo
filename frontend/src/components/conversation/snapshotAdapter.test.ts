@@ -5,7 +5,7 @@ import { persistedTurnToConversationTurn, snapshotToExecutionState } from './con
 import { aggregateResources, executionSnapshotToTraceView } from '../layout/executionTraceAdapter'
 
 const snapshot: RunSnapshot = {
-  run_id: 'r1', session_id: 's1', turn_id: 1,
+  run_id: 'r1', session_id: 's1', turn_id: 't1',
   status: 'completed', phase: 'completed', reason: 'completed', error: null,
   active_agent: 'builder', started_at: 1000, ended_at: 3000,
   current_activity: '研判完成',

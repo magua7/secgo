@@ -265,7 +265,9 @@ def _make_done_cb(session_id: str, channel: SessionChannel):
     若此时前端还锁着输入框会永久卡死——这里补发一个 end 事件解锁。
     """
     def cb(task: asyncio.Task) -> None:
-        _tasks.pop(session_id, None)
+        # identity check：只删当前 task 自己注册的引用，绝不误删之后注册的新任务
+        if _tasks.get(session_id) is task:
+            _tasks.pop(session_id, None)
         cancel_waiting_input(session_id)
         if task.cancelled():
             return  # 终止由 cancel 端点主动推送 engine:end(cancelled)
@@ -279,6 +281,17 @@ def _make_done_cb(session_id: str, channel: SessionChannel):
                 "error": str(exc)[:300],
             })
     return cb
+
+
+def _session_busy(session_id: str) -> bool:
+    """同一 Session 当前是否已有「未结束的独立 Run」（awaiting continuation 不算 busy）。
+
+    awaiting_user 补充输入是合法 continuation，不能误判为并发新 Run。
+    """
+    if is_engine_awaiting_input(session_id):
+        return False
+    task = _tasks.get(session_id)
+    return task is not None and not task.done()
 
 
 def _ensure_started() -> None:
@@ -915,6 +928,14 @@ async def api_chat(request: Request, _auth=Depends(require_ready_state)) -> JSON
 
     is_resume = is_engine_awaiting_input(session_id)
     _awaiting_sessions.discard(session_id)
+
+    # 并发保护：同 Session 已有未结束的独立 Run（非 awaiting continuation）→ 拒绝启动第二个引擎
+    if not is_resume and _session_busy(session_id):
+        return JSONResponse({
+            "ok": False,
+            "code": "SESSION_BUSY",
+            "message": "当前会话已有正在执行的安全任务，请等待完成或先停止当前任务。",
+        }, status_code=409)
 
     turn_id = str(uuid.uuid4())
     db_path = resolve_session_db_path()

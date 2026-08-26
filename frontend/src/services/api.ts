@@ -15,8 +15,8 @@ export async function apiRequest<T>(url: string, options: RequestInit = {}): Pro
     let responseBody: unknown = null
     try {
       responseBody = await response.json()
-      const body = responseBody as { error?: string; detail?: string }
-      message = body.error ?? body.detail ?? message
+      const body = responseBody as { error?: string; detail?: string; message?: string }
+      message = body.error ?? body.detail ?? body.message ?? message
     } catch { /* non-JSON response */ }
     throw new ApiError(message, response.status, response.status === 401 ? '/login' : null, responseBody)
   }

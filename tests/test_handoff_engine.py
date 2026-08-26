@@ -232,3 +232,57 @@ class InputResolverTests(unittest.IsolatedAsyncioTestCase):
             event.get("session_id") == session_id and event.get("reason") == "cancelled"
             for event in events
         ))
+
+
+class _FakeTask:
+    def __init__(self, done=False):
+        self._done = done
+
+    def done(self):
+        return self._done
+
+
+class SessionBusyGuardTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        server._channels.pop("s-busy", None)
+        server._channels.pop("s-busy-api", None)
+        server._awaiting_sessions.discard("s-busy")
+        server._awaiting_sessions.discard("s-busy-api")
+
+    def tearDown(self):
+        server._tasks.pop("s-busy", None)
+        server._tasks.pop("s-busy-api", None)
+        server._channels.pop("s-busy", None)
+        server._channels.pop("s-busy-api", None)
+
+    def test_busy_when_running_and_not_awaiting(self):
+        server._tasks["s-busy"] = _FakeTask(done=False)
+        with patch.object(server, "is_engine_awaiting_input", return_value=False):
+            self.assertTrue(server._session_busy("s-busy"))
+
+    def test_not_busy_when_task_done(self):
+        server._tasks["s-busy"] = _FakeTask(done=True)
+        with patch.object(server, "is_engine_awaiting_input", return_value=False):
+            self.assertFalse(server._session_busy("s-busy"))
+
+    def test_not_busy_when_awaiting_continuation(self):
+        server._tasks["s-busy"] = _FakeTask(done=False)
+        with patch.object(server, "is_engine_awaiting_input", return_value=True):
+            self.assertFalse(server._session_busy("s-busy"))
+
+    async def test_api_chat_rejects_second_independent_run_with_409(self):
+        import json as _json
+        server._tasks["s-busy-api"] = _FakeTask(done=False)
+
+        class _Req:
+            async def json(self):
+                return {"message": "task2", "sessionId": "s-busy-api"}
+
+        with patch.object(server, "is_engine_awaiting_input", return_value=False):
+            resp = await server.api_chat(_Req(), None)
+        self.assertEqual(resp.status_code, 409)
+        body = _json.loads(resp.body)
+        self.assertEqual(body["code"], "SESSION_BUSY")
+        self.assertIn("正在执行", body["message"])
+        # _tasks 仍指向原来的 run（未被覆盖/清理）
+        self.assertIsInstance(server._tasks["s-busy-api"], _FakeTask)
