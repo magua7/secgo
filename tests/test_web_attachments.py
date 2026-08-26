@@ -52,6 +52,8 @@ class WebAttachmentTests(unittest.TestCase):
         self.patchers = [
             patch.object(attachments, "UPLOADS_BASE", self.uploads),
             patch.object(attachments, "get_workspace_base", return_value=self.workspace),
+            # 关键隔离：本测试类内所有 server.api_chat 都写进临时库，绝不污染 runtime/memory/sec-go.db
+            patch.object(server, "resolve_session_db_path", return_value=str(self.db_path)),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -59,6 +61,7 @@ class WebAttachmentTests(unittest.TestCase):
     def tearDown(self) -> None:
         server._awaiting_sessions.clear()
         server._channels.clear()
+        server._tasks.clear()
         for patcher in reversed(self.patchers):
             patcher.stop()
         self.temp_dir.cleanup()
@@ -162,6 +165,36 @@ class WebAttachmentTests(unittest.TestCase):
         response = asyncio.run(call_chat())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured, [("hello", session_id)])
+
+    def test_plain_text_chat_persists_to_temporary_database(self) -> None:
+        # 防回归：api_chat 必须写进 setUp patch 的临时库，而非生产库 runtime/memory/sec-go.db
+        self.assertEqual(server.resolve_session_db_path(), str(self.db_path))
+        session_id = str(uuid.uuid4())
+        captured = []
+
+        async def call_chat():
+            with (
+                patch.object(server, "run_engine", new=lambda message, sid: captured.append((message, sid))),
+                patch.object(server.asyncio, "get_running_loop", return_value=_DummyLoop()),
+            ):
+                return await server.api_chat(_request({"message": "hello", "sessionId": session_id}))
+
+        response = asyncio.run(call_chat())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured, [("hello", session_id)])
+
+        manager = SessionManager(str(self.db_path))
+        try:
+            state = manager.load_state(session_id)
+            self.assertIsNotNone(state)
+            self.assertTrue(
+                any(
+                    m.get("role") == "user" and m.get("content") == "hello"
+                    for m in (state or {}).get("messages", [])
+                )
+            )
+        finally:
+            manager.close()
 
     def test_upload_requires_login(self) -> None:
         with patch.object(server, "_auth_enabled", return_value=True):
