@@ -22,8 +22,13 @@ export interface ToolUse {
 }
 
 export interface EvidenceItem {
+  id?: string
+  type?: string
+  title?: string
   source: string
   summary: string
+  timestamp?: number
+  metadata?: Record<string, unknown>
 }
 
 export interface NarrativeUpdate {

@@ -6,19 +6,18 @@ import { RightPanel } from './RightPanel'
 afterEach(cleanup)
 
 describe('RightPanel', () => {
-  it('renders historical execution as a neutral read-only replay without fake identity or time', () => {
+  it('renders snapshot history with the same trace UI plus a light history badge', () => {
     const view: ExecutionTraceViewModel = {
-      mode: 'history-readonly', kind: 'agent_task', status: 'idle', activeAgent: 'agent',
-      timeline: [{ id: 'h1', at: null, kind: 'tool', title: '工具输出 · curl', detail: 'HTTP 200' }],
-      evidence: [], resources: [], notice: '历史数据只读',
+      mode: 'history', kind: 'agent_task', status: 'completed', activeAgent: 'builder',
+      timeline: [{ id: 'h1', at: 1000, kind: 'tool', title: '调用 web_search', detail: 'HTTP 200', status: 'completed' }],
+      evidence: [{ id: 'e1', type: 'finding', title: '网页搜索结果', source: 'web_search', summary: 'found' }],
+      resources: [{ name: 'web_search', count: 1, invocations: [{ name: 'web_search', status: 'completed', result: 'found' }] }],
+      notice: null,
     }
     render(<RightPanel view={view} tab="trace" onTabChange={vi.fn()} />)
-    expect(screen.getByText('历史执行回放')).toBeInTheDocument()
-    expect(screen.getByText('只读')).toBeInTheDocument()
-    expect(screen.queryByText('Planner')).not.toBeInTheDocument()
-    expect(screen.queryByText('—')).not.toBeInTheDocument()
-    expect(screen.getByText('HTTP 200').tagName).toBe('PRE')
-    expect(screen.getByText('查看原始输出').closest('details')).not.toHaveAttribute('open')
+    expect(screen.getByText('历史记录')).toBeInTheDocument()
+    expect(screen.getByText('调用 web_search')).toBeInTheDocument()
+    expect(screen.getByText('HTTP 200').tagName).toBe('P')
   })
 
   it('uses the shared empty state for a direct response', () => {
@@ -34,7 +33,7 @@ describe('RightPanel', () => {
 
   it('distinguishes a new task from a direct response', () => {
     const view: ExecutionTraceViewModel = {
-      mode: 'history-readonly', kind: 'empty', status: 'idle', activeAgent: 'agent',
+      mode: 'live', kind: 'empty', status: 'idle', activeAgent: 'planner',
       timeline: [], evidence: [], resources: [], notice: null,
     }
     render(<RightPanel view={view} tab="trace" onTabChange={vi.fn()} />)

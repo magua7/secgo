@@ -60,6 +60,7 @@ from ..runtime.attachments import (
 )
 from ..runtime.eventbus import event_bus
 from ..runtime.session import SessionManager, resolve_session_db_path
+from ..runtime import turn_manager
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 RING_BUFFER_SIZE = 2000
@@ -270,7 +271,8 @@ def _make_done_cb(session_id: str, channel: SessionChannel):
             return  # 终止由 cancel 端点主动推送 engine:end(cancelled)
         exc = task.exception()
         if exc is not None and not _last_event_is_terminal(channel):
-            channel.push("engine:end", {
+            # 走 event_bus：既推送 SSE channel，又让 TurnRecorder 收尾当前 Turn
+            event_bus.emit("engine:end", {
                 "session_id": session_id,
                 "reason": "crashed",
                 "total_steps": 0,
@@ -293,6 +295,11 @@ def _ensure_started() -> None:
         if channel is None:
             return
         event_name = data.get("_event")
+        # 给 SSE 事件标注 turn_id，前端据此把事件路由到正确的 Turn（而非仅靠 session 最新 Turn）
+        turn_id = turn_manager.active_turn_id(sid)
+        if turn_id and "turn_id" not in data:
+            data = dict(data)
+            data["turn_id"] = turn_id
         channel.push(event_name, data)
 
     def make_handler(event_name: str):
@@ -309,6 +316,8 @@ def _ensure_started() -> None:
         "tool:stream-start", "tool:stream-end",
         # 挂起等输入/继续执行也必须推送：否则前端无感知，输入框会一直禁用
         "engine:awaiting_input", "engine:user_input",
+        # 显式证据事件 + 持久化告警：前端只据此构造 Evidence / 提示保存失败
+        "engine:evidence", "persistence:warning",
     ):
         event_bus.on(event_name, make_handler(event_name))
 
@@ -799,6 +808,17 @@ async def api_upload_attachment(req: _AttachmentUploadReq,
     })
 
 
+def _attachment_presentation(metadata) -> Dict[str, Any]:
+    """附件的展示形态（不含 SHA256/服务器路径等内部信息）。"""
+    return {
+        "id": metadata.attachment_id,
+        "filename": metadata.original_name,
+        "mimeType": metadata.mime_type,
+        "kind": metadata.detected_kind,
+        "size": metadata.size,
+    }
+
+
 def _attachment_prompt(session_id: str, attachments: list) -> str:
     sections = ["[用户附件]"]
     for index, metadata in enumerate(attachments, 1):
@@ -881,45 +901,60 @@ async def api_chat(request: Request, _auth=Depends(require_ready_state)) -> JSON
     except (OSError, ValueError) as error:
         return JSONResponse({"error": f"附件关联会话失败：{error}"}, status_code=400)
 
+    # display 与 engine input 分离：展示层只放用户真正看到的问题 + 结构化附件；
+    # 内部 engine_message（含 evidence_id/SHA256/提取内容）绝不作为 display message。
     engine_message = message
+    display_message = message
+    display_attachments: list = []
     if moved_attachments:
         question = message or "请分析这些附件。"
         engine_message = f"{_attachment_prompt(session_id, moved_attachments)}\n\n用户问题：\n{question}"
+        display_message = question
+        display_attachments = [_attachment_presentation(m) for m in moved_attachments]
     channel = _get_channel(session_id)
 
-    # resolver 是真实等待状态；_awaiting_sessions 仅用于事件/UI 追踪。
-    if is_engine_awaiting_input(session_id):
-        _awaiting_sessions.discard(session_id)
-        if provide_user_input(session_id, engine_message):
-            return JSONResponse({"sessionId": session_id, "accepted": True, "resumed": True})
-    else:
-        _awaiting_sessions.discard(session_id)
+    is_resume = is_engine_awaiting_input(session_id)
+    _awaiting_sessions.discard(session_id)
 
-    # 续聊预注入：会话已存在时，先把新消息写入持久化历史。
-    # 引擎 run_engine 加载历史时会覆盖其初始 user_input（引擎内 messages 初值被历史替换），
-    # 故在 Web 层把新指令补进历史，保证 agent 首轮即能响应新输入。不触碰引擎代码。
-    if body.get("sessionId"):
-        db_path = resolve_session_db_path()
-        manager = SessionManager(db_path)
-        try:
-            state = manager.load_state(session_id)
-            if state is not None:
-                msgs = state.get("messages") or []
-                msgs.append({"role": "user", "content": engine_message})
-                state["messages"] = msgs
-                manager.save_state(session_id, state)
-        finally:
-            manager.close()
+    turn_id = str(uuid.uuid4())
+    db_path = resolve_session_db_path()
+    manager = SessionManager(db_path)
+    try:
+        loaded = manager.load_state(session_id)
+        is_new = loaded is None
+        state = loaded or {}
+        # 引擎上下文：续聊把新指令补进 engine messages（run_engine 加载时覆盖初值）
+        msgs = list(state.get("messages") or [])
+        msgs.append({"role": "user", "content": engine_message})
+        state["messages"] = msgs
+        manager.save_state(session_id, state)
+        # 新建 Turn（多轮对话真相：每个 Turn 独立一行、独立 execution snapshot）
+        sequence = manager.get_next_turn_sequence(session_id)
+        manager.create_turn(
+            session_id, turn_id, sequence,
+            {"text": display_message, "attachments": display_attachments},
+            kind="direct_response", status="running",
+        )
+        if is_new:
+            manager.set_meta(session_id, title=display_message[:30])
+    finally:
+        manager.close()
+
+    # 订阅事件流，把本次 Turn 的执行镜像为独立 snapshot（不覆盖其它 Turn）
+    turn_manager.start_turn(session_id, turn_id)
+
+    if is_resume and provide_user_input(session_id, engine_message):
+        return JSONResponse({"sessionId": session_id, "turnId": turn_id, "accepted": True, "resumed": True})
 
     task = asyncio.get_running_loop().create_task(run_engine(engine_message, session_id))
     _tasks[session_id] = task
     task.add_done_callback(_make_done_cb(session_id, channel))
-    return JSONResponse({"sessionId": session_id, "accepted": True, "resumed": False})
+    return JSONResponse({"sessionId": session_id, "turnId": turn_id, "accepted": True, "resumed": False})
 
 
 @app.post("/api/sessions/{session_id}/cancel")
 async def api_cancel_session(session_id: str, _auth=Depends(require_ready_state)) -> JSONResponse:
-    """终止正在运行的引擎任务：取消协程 + 推送 end 事件解锁前端。"""
+    """终止正在运行的引擎任务：取消协程 + 推送 end 事件解锁前端 + 收尾当前 Turn。"""
     global _awaiting_sessions
     _awaiting_sessions.discard(session_id)
     waiting_cancelled = cancel_waiting_input(session_id)
@@ -928,8 +963,8 @@ async def api_cancel_session(session_id: str, _auth=Depends(require_ready_state)
     if task is not None and not task.done():
         task.cancel()
         cancelled = True
-    channel = _get_channel(session_id)
-    channel.push("engine:end", {
+    # 走 event_bus 推送：SSE channel 收到（带 turn_id），TurnRecorder 同时把当前 Turn 落 stopped 终态
+    event_bus.emit("engine:end", {
         "session_id": session_id,
         "reason": "cancelled",
         "total_steps": 0,
@@ -1020,6 +1055,7 @@ async def api_sessions(_auth=Depends(require_ready_state)) -> JSONResponse:
                 "title": m.get("title", ""),
                 "messageCount": s["messageCount"],
                 "stepCount": s["stepCount"],
+                "status": s.get("status", "idle"),
                 "createdAt": m.get("createdAt", 0),
                 "updatedAt": m.get("updatedAt", 0),
             })
@@ -1059,32 +1095,54 @@ async def api_delete_session(session_id: str, _auth=Depends(require_ready_state)
         manager.close()
 
 
-def _render_messages(messages: list) -> list:
-    """把引擎内部消息渲染为前端可展示的结构。"""
-    rendered: list = []
+def _legacy_turns_from_messages(messages: list) -> list:
+    """旧会话（无 conversation_turns）兜底：从引擎 messages 粗粒度还原 turns。
+
+    只还原真实用户提问（剥离内部 prompt），execution 置空（旧数据没有 per-turn snapshot）。
+    """
+    turns: list = []
+    current_user: Optional[str] = None
+    current_assistant: Optional[str] = None
+    seq = 0
+
+    def flush() -> None:
+        nonlocal current_user, current_assistant, seq
+        if current_user is not None:
+            seq += 1
+            turns.append({
+                "id": f"legacy-{seq}",
+                "sequence": seq,
+                "kind": "direct_response",
+                "userMessage": {"text": current_user, "attachments": []},
+                "assistantAnswer": current_assistant,
+                "execution": None,
+                "status": "completed",
+                "createdAt": None,
+                "updatedAt": None,
+            })
+        current_user = None
+        current_assistant = None
+
     for msg in messages:
+        if not isinstance(msg, dict):
+            continue
         role = msg.get("role")
         content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
         if role == "user":
-            if isinstance(content, str):
-                rendered.append({"kind": "user", "text": content})
+            if content.startswith(("[系统提示", "[Handoff", "[工具结果")):
+                continue
+            text = content.split("用户问题：", 1)[1].strip() if "用户问题：" in content else content
+            if text.startswith("[用户附件]"):
+                continue
+            flush()
+            current_user = text
         elif role == "assistant":
-            text = content if isinstance(content, str) else ""
-            if not text and isinstance(content, list):
-                parts = [
-                    p.get("text", "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                ]
-                text = "".join(parts)
-            if text:
-                rendered.append({"kind": "assistant", "text": text})
-        elif role == "tool":
-            rendered.append({
-                "kind": "tool",
-                "text": f"[工具结果] {content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)}",
-            })
-    return rendered
+            if content and current_assistant is None:
+                current_assistant = content
+    flush()
+    return turns
 
 
 @app.get("/api/sessions/{session_id}/messages")
@@ -1095,11 +1153,17 @@ async def api_session_messages(session_id: str, _auth=Depends(require_ready_stat
         state = manager.load_state(session_id)
         if state is None:
             return JSONResponse({"error": "session not found"}, status_code=404)
-        messages = state.get("messages") or []
+        turns = manager.list_turns(session_id)
+        if not turns:
+            # 旧会话（无 conversation_turns）兜底
+            turns = _legacy_turns_from_messages(state.get("messages") or [])
+        status = manager.get_session_status(session_id)
+        if status == "idle":
+            status = state.get("status") or "idle"
         return JSONResponse({
             "sessionId": session_id,
-            "messages": _render_messages(messages),
-            "todoList": state.get("todoList") or [],
+            "status": status,
+            "turns": turns,
         })
     finally:
         manager.close()

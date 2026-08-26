@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '../common/Icon'
 import { handleApiError, uploadAttachment } from '../../services/api'
-import { formatAttachmentSize, releaseAttachmentPreview, toPendingAttachments, type PendingAttachment } from '../../types/attachment'
+import { formatAttachmentSize, releaseAttachmentPreview, toPendingAttachments, type MessageAttachment, type PendingAttachment } from '../../types/attachment'
 
-interface Props { running: boolean; onSend: (text: string, attachmentIds: string[]) => Promise<void>; onStop: () => Promise<void> }
+interface Props { running: boolean; onSend: (text: string, attachmentIds: string[], attachments: MessageAttachment[]) => Promise<void>; onStop: () => Promise<void> }
 
 export function Composer({ running, onSend, onStop }: Props) {
   const [value, setValue] = useState('')
@@ -36,7 +36,8 @@ export function Composer({ running, onSend, onStop }: Props) {
   const submit = async () => {
     const text = value.trim()
     if ((!text && !files.length) || running || uploading || files.some((file) => file.status === 'error')) return
-    try { await onSend(text, files.flatMap((file) => file.attachmentId ? [file.attachmentId] : [])) }
+    const attachments: MessageAttachment[] = files.flatMap((file) => file.attachmentId ? [{ id: file.attachmentId, filename: file.name, mimeType: file.mimeType, kind: file.kind ?? 'binary', size: file.size }] : [])
+    try { await onSend(text, attachments.map((attachment) => attachment.id), attachments) }
     catch { return }
     setValue(''); files.forEach(releaseAttachmentPreview); setFiles([])
   }

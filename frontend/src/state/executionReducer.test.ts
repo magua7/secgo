@@ -13,7 +13,7 @@ describe('executionReducer', () => {
     expect(state.executionExpanded).toBe(false)
   })
 
-  it('tracks handoffs, tools, todos and evidence without exposing thinking text', () => {
+  it('tracks handoffs, tools, todos and only explicit evidence without exposing thinking text', () => {
     let state = executionReducer(initialExecutionState, { type: 'agent:thinking', data: { session_id: 's1', agent_id: 'research' } })
     state = executionReducer(state, { type: 'agent:switch', data: { session_id: 's1', from_agent_id: 'research', to_agent_id: 'operator', reason: '验证情报' } })
     state = executionReducer(state, { type: 'tool:stream-start', data: { session_id: 's1', tool_name: 'VirusTotal', args: { domain: 'example.com' } } })
@@ -21,6 +21,8 @@ describe('executionReducer', () => {
     state = executionReducer(state, { type: 'todo:updated', data: { session_id: 's1', todo_list: [{ text: '验证证据', done: true }] } })
     expect(state.timeline.some((item) => item.kind === 'handoff')).toBe(true)
     expect(state.tools[0]?.status).toBe('completed')
+    expect(state.evidence).toHaveLength(0)
+    state = executionReducer(state, { type: 'engine:evidence', data: { session_id: 's1', evidence: { id: 'e1', type: 'finding', title: 'VirusTotal 结果', source: 'VirusTotal', summary: 'malicious: 3' } } })
     expect(state.evidence[0]?.summary).toContain('malicious')
     expect(state.tasks[0]?.done).toBe(true)
     expect(state.completedSteps).toContain('验证证据')
@@ -83,12 +85,19 @@ describe('executionReducer', () => {
     expect(state.report).toBe('# 最终报告')
   })
 
-  it('deduplicates stream-end and tool-result for the same backend call', () => {
+  it('deduplicates stream-end and tool-result and never auto-promotes tool output to evidence', () => {
     let state = executionReducer(initialExecutionState, { type: 'tool:stream-start', data: { session_id: 's1', tool_name: 'dns_lookup', args: {} } })
     state = executionReducer(state, { type: 'tool:stream-end', data: { session_id: 's1', tool_name: 'dns_lookup', result: '1.2.3.4' } })
     state = executionReducer(state, { type: 'tool:result', data: { session_id: 's1', tool_name: 'dns_lookup', result: '1.2.3.4' } })
     expect(state.tools).toHaveLength(1)
-    expect(state.evidence).toHaveLength(1)
+    expect(state.evidence).toHaveLength(0)
+  })
+
+  it('keeps skill_list tool output out of evidence', () => {
+    let state = executionReducer(initialExecutionState, { type: 'tool:stream-start', data: { session_id: 's1', tool_name: 'skill_list', args: {} } })
+    state = executionReducer(state, { type: 'tool:stream-end', data: { session_id: 's1', tool_name: 'skill_list', result: '104 个技能' } })
+    expect(state.evidence).toHaveLength(0)
+    expect(state.tools).toHaveLength(1)
   })
 
   it('archives readable narrative before a later SSE boundary clears the stream buffer', () => {

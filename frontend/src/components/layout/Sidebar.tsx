@@ -51,7 +51,7 @@ export function Sidebar(props: Props) {
       <h3 className="session-group-title">{group.label}</h3>
       {group.sessions.length === 0 && <span className="empty-group">暂无会话</span>}
       {group.sessions.map((session) => <div className={`session-row ${props.currentId === session.id ? 'active' : ''}`} key={session.id}>
-        <button className="session-main" onClick={() => { closeMenu(); props.onSelect(session.id) }}><span>{session.title || `${session.id.slice(0, 8)}…`}</span><small>{formatActivityTime(session.updatedAt ?? session.createdAt)}</small></button>
+        <button className="session-main" onClick={() => { closeMenu(); props.onSelect(session.id) }}><span>{session.title || `${session.id.slice(0, 8)}…`}</span>{sessionStatusMark(session.status)}<small>{formatActivityTime(session.updatedAt ?? session.createdAt)}</small></button>
          <button type="button" className="session-more-button" aria-label="会话操作" aria-haspopup="menu" aria-expanded={openMenuId === session.id} onClick={(event) => {
            if (openMenuId === session.id) { closeMenu(); return }
            setOpenMenuId(session.id)
@@ -63,6 +63,15 @@ export function Sidebar(props: Props) {
     {openMenu && <SessionContextMenu session={openMenu.session} anchorRect={openMenu.anchorRect} onRename={props.onRename} onDelete={props.onDelete} onClose={closeMenu} menuRef={menuRef} />}
     
   </aside>
+}
+
+function sessionStatusMark(status: string | undefined): string | null {
+  if (!status) return null
+  if (status === 'running' || status === 'queued' || status === 'awaiting_user') return '●'
+  if (status === 'completed') return '✓'
+  if (status === 'error') return '⚠'
+  if (status === 'stopped') return '■'
+  return null
 }
 
 function formatActivityTime(value: number | string | null) {

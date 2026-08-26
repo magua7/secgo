@@ -1,6 +1,8 @@
 import type { ConversationTurn, DetailedExecutionEntry, ExecutionPresentation, ToolExecutionGroup } from '../../types/conversation'
-import type { ConversationPhase, ExecutionState } from '../../types/execution'
-import type { HistoryMessage, TodoItem } from '../../types/session'
+import type { ConversationPhase, ExecutionState, ExecutionStatus } from '../../types/execution'
+import type { PersistedTurn } from '../../types/session'
+import type { RunSnapshot } from '../../types/snapshot'
+import type { MessageAttachment } from '../../types/attachment'
 
 const groupTools = (entries: Array<{ name: string; text: string }>): ToolExecutionGroup[] => {
   const groups = new Map<string, string[]>()
@@ -28,15 +30,6 @@ export const classifyConversationKind = (signals: ConversationSignals): Conversa
   + (signals.internalCount ?? 0) > 0 ? 'agent_task' : 'direct_response'
 )
 
-export type HistoryMessageSemantic = 'user' | 'assistant' | 'tool_output' | 'handoff' | 'system'
-
-export function historyMessageSemantic(message: HistoryMessage): HistoryMessageSemantic {
-  if (message.kind === 'tool' || /^\[工具结果(?:\s+[^\]]+)?\]\s*:?/u.test(message.text)) return 'tool_output'
-  if (message.kind === 'user' && /^\[Handoff from [^\]]+\]\s*:/i.test(message.text)) return 'handoff'
-  if (message.kind === 'user' && /^\[系统提示：你已执行\s+\d+\s+步。/u.test(message.text)) return 'system'
-  return message.kind
-}
-
 export function hasAgentTaskSignals(state: ExecutionState): boolean {
   return classifyConversationKind({
     todoCount: state.tasks.length,
@@ -50,6 +43,7 @@ export function hasAgentTaskSignals(state: ExecutionState): boolean {
 interface NormalizedTurnInput {
   id: string
   userText: string
+  attachments?: MessageAttachment[]
   phase: ConversationPhase
   hasTaskSignals: boolean
   execution: ExecutionPresentation
@@ -63,63 +57,11 @@ export function normalizeConversationTurn(input: NormalizedTurnInput): Conversat
     id: input.id,
     kind,
     phase: kind === 'direct_response' && input.phase !== 'awaiting_user' ? 'direct_response' : input.phase,
-    userMessage: { text: input.userText },
+    userMessage: { text: input.userText, attachments: input.attachments },
     execution: kind === 'agent_task' ? input.execution : null,
     finalAnswer: input.assistantText?.trim() || null,
     isFinalStreaming: Boolean(input.isFinalStreaming),
   }
-}
-
-const historicalExecution = (messages: HistoryMessage[], todoList: TodoItem[], completed: boolean): ExecutionPresentation => {
-  const details: DetailedExecutionEntry[] = messages.filter((message) => historyMessageSemantic(message) !== 'tool_output').map((message, index) => ({
-    id: `history-${index}`,
-    kind: historyMessageSemantic(message) === 'handoff' || historyMessageSemantic(message) === 'system' ? 'system' : 'narrative',
-    text: message.text,
-  }))
-  const toolEntries = messages.filter((message) => historyMessageSemantic(message) === 'tool_output').map((message) => ({ name: '已保存的工具输出', text: message.text }))
-  return {
-    source: 'history', status: completed ? 'completed' : 'idle', phase: completed ? 'completed' : 'idle', activeAgent: 'agent', currentActivity: '', keyProgress: [], narrativeUpdates: [], details,
-    toolGroups: groupTools(toolEntries), completedTasks: todoList.filter((task) => task.done).length, totalTasks: todoList.length,
-    evidenceCount: null, totalSteps: details.length + toolEntries.length, agentCount: details.length ? 1 : 0,
-    error: null, expanded: false, elapsedMs: null, startedAt: null, endedAt: null,
-  }
-}
-
-export function historyMessagesToTurns(messages: HistoryMessage[], todoList: TodoItem[] = []): ConversationTurn[] {
-  const starts = messages.reduce<number[]>((items, message, index) => {
-    if (historyMessageSemantic(message) === 'user') items.push(index)
-    return items
-  }, [])
-  return starts.map((start, turnIndex) => {
-    const end = starts[turnIndex + 1] ?? messages.length
-    const segment = messages.slice(start + 1, end)
-    const turnTodoList = turnIndex === starts.length - 1 ? todoList : []
-    let lastAssistantIndex = -1
-    for (let index = segment.length - 1; index >= 0; index -= 1) {
-      if (segment[index]?.kind === 'assistant') { lastAssistantIndex = index; break }
-    }
-    const allTodosDone = turnTodoList.length > 0 && turnTodoList.every((task) => task.done)
-    const canUseFinalAssistant = lastAssistantIndex >= 0 && (lastAssistantIndex === segment.length - 1 || allTodosDone)
-    const finalAnswer = canUseFinalAssistant ? segment[lastAssistantIndex]?.text ?? null : null
-    const executionMessages = canUseFinalAssistant ? segment.filter((_, index) => index !== lastAssistantIndex) : segment
-    const hasTaskSignals = classifyConversationKind({
-      todoCount: turnTodoList.length,
-      toolOutputCount: segment.filter((message) => historyMessageSemantic(message) === 'tool_output').length,
-      handoffCount: segment.filter((message) => historyMessageSemantic(message) === 'handoff').length,
-      internalCount: segment.filter((message) => historyMessageSemantic(message) === 'system').length,
-    }) === 'agent_task'
-    // The history payload has no terminal status/reason. Keep the replay neutral
-    // even when every persisted Todo is done instead of inventing a completed run.
-    const completed = false
-    return normalizeConversationTurn({
-      id: `history-turn-${start}`,
-      userText: messages[start]?.text ?? '',
-      phase: completed ? 'completed' : 'idle',
-      hasTaskSignals,
-      execution: historicalExecution(executionMessages, turnTodoList, completed),
-      assistantText: finalAnswer,
-    })
-  })
 }
 
 export function executionToPresentation(state: ExecutionState): ExecutionPresentation {
@@ -140,7 +82,7 @@ export function executionToPresentation(state: ExecutionState): ExecutionPresent
   }
 }
 
-export function liveExecutionToTurn(question: string, state: ExecutionState): ConversationTurn {
+export function liveExecutionToTurn(question: string, state: ExecutionState, attachments?: MessageAttachment[]): ConversationTurn {
   const task = hasAgentTaskSignals(state)
   const directText = state.assistantReply || state.finalAnswer || state.report
   const taskText = state.phase === 'awaiting_user'
@@ -151,15 +93,92 @@ export function liveExecutionToTurn(question: string, state: ExecutionState): Co
         ? state.finalAnswer
         : ''
   return normalizeConversationTurn({
-    id: 'live-turn', userText: question, phase: state.phase, hasTaskSignals: task, execution: executionToPresentation(state),
+    id: 'live-turn', userText: question, attachments, phase: state.phase, hasTaskSignals: task, execution: executionToPresentation(state),
     assistantText: task ? taskText : directText,
     isFinalStreaming: Boolean((!task && state.status === 'running' && directText) || (task && state.phase === 'reporting' && taskText)),
   })
 }
 
-export function commitVisibleLiveTurn(turns: ConversationTurn[], question: string, state: ExecutionState): ConversationTurn[] {
-  if (!question.trim()) return turns
-  const turn = liveExecutionToTurn(question, state)
-  if (!turn.finalAnswer && !turn.execution) return turns
-  return [...turns, { ...turn, id: `committed-live-turn-${turns.length + 1}`, isFinalStreaming: false }]
+const snapshotStatusMap: Record<string, ExecutionStatus> = {
+  idle: 'idle', queued: 'loading', running: 'running', awaiting_user: 'awaiting_input',
+  completed: 'completed', stopped: 'cancelled', error: 'error',
+}
+const snapshotPhaseMap: Record<string, ConversationPhase> = {
+  idle: 'idle', planning: 'planning', executing: 'executing', awaiting_user: 'awaiting_user',
+  reporting: 'reporting', completed: 'completed', stopped: 'stopped', error: 'error',
+}
+
+// 历史 RunSnapshot → ExecutionState：让历史进入与实时完全相同的 ExecutionViewModel 数据流。
+export function snapshotToExecutionState(snapshot: RunSnapshot): ExecutionState {
+  const report = snapshot.final_report ?? snapshot.partial_report ?? snapshot.last_assistant_output ?? ''
+  const status = snapshotStatusMap[snapshot.status] ?? 'idle'
+  const phase = snapshotPhaseMap[snapshot.phase] ?? 'idle'
+  return {
+    status,
+    phase,
+    activeAgent: snapshot.active_agent ?? 'planner',
+    tasks: snapshot.tasks ?? [],
+    timeline: (snapshot.timeline ?? []).map((item) => ({ ...item })),
+    tools: (snapshot.resources ?? []).map((resource) => ({
+      name: resource.name,
+      args: resource.args ?? undefined,
+      result: resource.result ?? undefined,
+      status: resource.status,
+    })),
+    evidence: (snapshot.evidence ?? []).map((item) => ({
+      id: item.id, type: item.type, title: item.title, source: item.source,
+      summary: item.summary, timestamp: item.timestamp, metadata: item.metadata,
+    })),
+    findings: snapshot.key_findings ?? [],
+    completedSteps: (snapshot.tasks ?? []).filter((task) => task.done).map((task) => task.text),
+    keyFindings: snapshot.key_findings ?? [],
+    narrativeUpdates: snapshot.narrative_updates ?? [],
+    keyProgress: snapshot.key_progress ?? [],
+    report,
+    currentActivity: snapshot.current_activity ?? '',
+    assistantReply: report,
+    finalAnswer: report,
+    lastAssistantOutput: snapshot.last_assistant_output ?? '',
+    lastStreamAgent: null,
+    startedAt: snapshot.started_at ?? null,
+    endedAt: snapshot.ended_at ?? null,
+    totalSteps: snapshot.total_steps ?? 0,
+    reason: snapshot.reason ?? '',
+    error: snapshot.error ?? null,
+    executionExpanded: status !== 'completed',
+    connection: 'idle',
+  }
+}
+
+// 持久化 Turn → ConversationTurn（复用统一 Renderer；普通 direct_response 也是正式 Turn）。
+export function persistedTurnToConversationTurn(turn: PersistedTurn): ConversationTurn {
+  const userText = turn.userMessage?.text ?? ''
+  const attachments = turn.userMessage?.attachments
+  if (!turn.execution) {
+    return {
+      id: turn.id,
+      kind: 'direct_response',
+      phase: 'idle',
+      userMessage: { text: userText, attachments },
+      execution: null,
+      finalAnswer: turn.assistantAnswer?.trim() || null,
+      isFinalStreaming: false,
+    }
+  }
+  const state = snapshotToExecutionState(turn.execution)
+  const hasTaskSignals = hasAgentTaskSignals(state)
+  return normalizeConversationTurn({
+    id: turn.id,
+    userText,
+    attachments,
+    phase: state.phase,
+    hasTaskSignals,
+    execution: executionToPresentation(state),
+    assistantText: turn.assistantAnswer ?? state.finalAnswer,
+    isFinalStreaming: false,
+  })
+}
+
+export function persistedTurnsToConversationTurns(turns: PersistedTurn[]): ConversationTurn[] {
+  return turns.map(persistedTurnToConversationTurn)
 }

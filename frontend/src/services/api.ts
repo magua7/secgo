@@ -1,5 +1,5 @@
 import type { AgentId, AgentOverrideInputs, ChatResponse, KeysStatus, LoginResponse, ModelConfigInput, SessionsResponse, SetupPayload, SetupResponse } from '../types/api'
-import type { SessionMessagesResponse } from '../types/session'
+import type { SessionConversationResponse } from '../types/session'
 
 export class ApiError extends Error {
   constructor(message: string, public readonly status: number, public readonly redirectTo: string | null = null, public readonly body: unknown = null) {
@@ -32,7 +32,7 @@ export async function login(password: string): Promise<LoginResponse> {
 export const logout = (): Promise<{ ok: boolean }> => apiRequest('/api/logout', { method: 'POST' })
 export const getKeysStatus = (): Promise<KeysStatus> => apiRequest('/api/keys-status')
 export const getSessions = (): Promise<SessionsResponse> => apiRequest('/api/sessions')
-export const getSessionMessages = (id: string): Promise<SessionMessagesResponse> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/messages`)
+export const getSessionMessages = (id: string): Promise<SessionConversationResponse> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/messages`)
 export const cancelSession = (id: string): Promise<{ sessionId: string; cancelled: boolean }> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
 export const deleteSession = (id: string): Promise<{ sessionId: string; deleted: boolean }> => apiRequest(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const renameSession = (id: string, title: string): Promise<{ sessionId: string; title: string }> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/title`, {

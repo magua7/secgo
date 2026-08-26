@@ -66,6 +66,7 @@ export interface SessionsResponse {
 
 export interface ChatResponse {
   sessionId: string
+  turnId?: string
   accepted: boolean
   resumed: boolean
 }

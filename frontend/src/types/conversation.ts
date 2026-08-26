@@ -1,4 +1,5 @@
 import type { ConversationPhase, ExecutionStatus, NarrativeUpdate } from './execution'
+import type { MessageAttachment } from './attachment'
 
 export interface DetailedExecutionEntry {
   id: string
@@ -38,7 +39,7 @@ export interface ConversationTurn {
   id: string
   kind: 'direct_response' | 'agent_task'
   phase: ConversationPhase
-  userMessage: { text: string }
+  userMessage: { text: string; attachments?: MessageAttachment[] }
   execution: ExecutionPresentation | null
   finalAnswer: string | null
   isFinalStreaming: boolean

@@ -23,16 +23,34 @@ export function ExecutionBlock({ state, presentation, onToggle = () => undefined
   const failed = view.status === 'error' || view.phase === 'error'
   const reporting = view.phase === 'reporting'
   const elapsed = formatElapsed(liveElapsed ?? view.elapsedMs)
-  const terminalLabel = completed ? '研判完成' : reporting ? '研判完成，正在生成报告' : stopped ? '任务已停止' : view.source === 'history' ? '历史执行记录' : view.phase === 'error' ? '执行异常' : '执行已结束'
-  const expandedLabel = stopped
-    ? '任务已停止'
-    : failed
-      ? '执行失败'
-      : view.phase === 'planning'
-        ? '正在规划安全研判'
-        : view.phase === 'awaiting_user'
-          ? '等待你的补充输入'
-          : '正在执行安全研判'
+  const terminalLabel = completed
+    ? '研判完成'
+    : reporting
+      ? '正在生成报告'
+      : stopped
+        ? '任务已停止'
+        : failed
+          ? '执行失败'
+          : view.phase === 'planning'
+            ? '正在规划安全研判'
+            : view.phase === 'awaiting_user' || view.status === 'awaiting_input'
+              ? '等待你的补充输入'
+              : view.source === 'history'
+                ? '历史执行记录'
+                : '正在执行安全研判'
+  const expandedLabel = completed
+    ? '研判完成'
+    : reporting
+      ? '正在生成报告'
+      : stopped
+        ? '任务已停止'
+        : failed
+          ? '执行失败'
+          : view.phase === 'planning'
+            ? '正在规划安全研判'
+            : view.phase === 'awaiting_user'
+              ? '等待你的补充输入'
+              : '正在执行安全研判'
   const historicalNarration = view.source === 'history' ? view.details.filter((item) => item.kind === 'narrative').slice(-4) : []
   const currentActivity = view.currentActivity || (historicalNarration.length > 0
     ? '已恢复可读取的历史 Agent 执行记录'
@@ -63,7 +81,7 @@ export function ExecutionBlock({ state, presentation, onToggle = () => undefined
     </button>
     <div className="execution-body">
       <div className="execution-summary">
-        {currentActivity && <section className="current-activity"><h3>{stopped || failed ? '最后活动' : '当前活动'}</h3><div className="execution-agent"><strong>{agentLabels[view.activeAgent] ?? view.activeAgent}</strong><small>{view.activeAgent}</small></div><p>● {currentActivity}</p></section>}
+        {currentActivity && <section className="current-activity"><h3>{completed || stopped || failed ? '最后活动' : '当前活动'}</h3><div className="execution-agent"><strong>{agentLabels[view.activeAgent] ?? view.activeAgent}</strong><small>{view.activeAgent}</small></div><p>● {currentActivity}</p></section>}
         {recentNarration.length > 0 && <section className="live-narration"><h3>过程播报</h3>{recentNarration.map((item) => <div className="narrative-line" key={item.id}><time dateTime={new Date(item.timestamp).toISOString()}>{new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</time><div><Markdown>{item.text}</Markdown></div></div>)}</section>}
         {recentNarration.length === 0 && historicalNarration.length > 0 && <section className="live-narration"><h3>过程播报</h3>{historicalNarration.map((item) => <div className="narrative-line" key={item.id}><span>历史</span><div><Markdown>{item.text}</Markdown></div></div>)}</section>}
         {view.keyProgress.length > 0 && <section><h3>关键进展</h3>{view.keyProgress.slice(-8).map((item) => <div className="progress-line" key={item}><span>✓</span><Markdown>{item}</Markdown></div>)}</section>}

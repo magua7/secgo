@@ -49,9 +49,32 @@ class SessionManager:
             "session_id TEXT PRIMARY KEY, title TEXT, "
             "created_at INTEGER, updated_at INTEGER)"
         )
+        self._create_turns_table()
         self._remove_legacy_group_schema()
         self._trim_sessions()
         self._conn.commit()
+
+    def _create_turns_table(self) -> None:
+        """多轮对话历史真相表：每个 Turn 一行，各自关联自己的 execution_snapshot。"""
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_turns ("
+            "id TEXT PRIMARY KEY, "
+            "session_id TEXT NOT NULL, "
+            "sequence INTEGER NOT NULL, "
+            "kind TEXT, "
+            "user_message TEXT, "
+            "assistant_answer TEXT, "
+            "execution_snapshot TEXT, "
+            "status TEXT, "
+            "created_at INTEGER, "
+            "updated_at INTEGER, "
+            "UNIQUE(session_id, sequence)"
+            ")"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_turns_session "
+            "ON conversation_turns(session_id)"
+        )
 
     def _remove_legacy_group_schema(self) -> None:
         """删除已下线的会话分组结构，同时保留所有会话元数据。"""
@@ -101,6 +124,9 @@ class SessionManager:
         self._conn.executemany("DELETE FROM sessions WHERE id = ?", session_ids)
         self._conn.executemany(
             "DELETE FROM session_meta WHERE session_id = ?", session_ids
+        )
+        self._conn.executemany(
+            "DELETE FROM conversation_turns WHERE session_id = ?", session_ids
         )
 
     def _touch_meta(self, session_id: str, state: Dict[str, Any]) -> None:
@@ -219,6 +245,7 @@ class SessionManager:
     def delete_session(self, session_id: str) -> None:
         self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         self._conn.execute("DELETE FROM session_meta WHERE session_id = ?", (session_id,))
+        self._conn.execute("DELETE FROM conversation_turns WHERE session_id = ?", (session_id,))
         self._conn.commit()
 
     def list_sessions(self) -> List[Dict[str, Any]]:
@@ -228,19 +255,109 @@ class SessionManager:
             try:
                 state = json.loads(state_str)
                 messages = state.get("messages", [])
+                status = self.get_session_status(sid)
+                if status == "idle":
+                    status = self._resolve_status(state)
                 sessions.append({
                     "id": sid,
                     "messageCount": len(messages),
                     "stepCount": state.get("stepCount", 0),
+                    "status": status,
                     "createdAt": 0,
                 })
             except Exception:
-                sessions.append({"id": sid, "messageCount": 0, "stepCount": 0, "createdAt": 0})
+                sessions.append({"id": sid, "messageCount": 0, "stepCount": 0, "status": "idle", "createdAt": 0})
         return sessions
+
+    @staticmethod
+    def _resolve_status(state: Dict[str, Any]) -> str:
+        """会话运行状态：优先取顶层 status，其次取 execution_snapshot.status。"""
+        top = state.get("status")
+        if top:
+            return str(top)
+        snapshot = state.get("execution_snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("status"):
+            return str(snapshot["status"])
+        return "idle"
 
     def get_session_summary(self, session_id: str) -> Optional[str]:
         state = self.load_state(session_id)
         return state.get("summaryCache") if state else None
+
+    # ── 多轮对话 Turn（Web Conversation 历史真相，独立于引擎 sessions.state） ──
+
+    def get_next_turn_sequence(self, session_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM conversation_turns WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0] or 0) + 1
+
+    def create_turn(self, session_id: str, turn_id: str, sequence: int,
+                    user_message: Dict[str, Any], kind: str, status: str = "running") -> None:
+        now = int(time.time() * 1000)
+        self._conn.execute(
+            "INSERT INTO conversation_turns "
+            "(id, session_id, sequence, kind, user_message, assistant_answer, execution_snapshot, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)",
+            (turn_id, session_id, sequence, kind, json.dumps(user_message, ensure_ascii=False), status, now, now),
+        )
+        self._conn.commit()
+
+    def update_turn(self, turn_id: str, *, assistant_answer: Optional[str] = None,
+                    execution_snapshot: Optional[Dict[str, Any]] = None,
+                    status: Optional[str] = None, kind: Optional[str] = None) -> None:
+        fields: Dict[str, Any] = {}
+        if assistant_answer is not None:
+            fields["assistant_answer"] = assistant_answer
+        if execution_snapshot is not None:
+            fields["execution_snapshot"] = json.dumps(execution_snapshot, ensure_ascii=False)
+        if status is not None:
+            fields["status"] = status
+        if kind is not None:
+            fields["kind"] = kind
+        if not fields:
+            return
+        fields["updated_at"] = int(time.time() * 1000)
+        set_clause = ", ".join(f"{key} = ?" for key in fields)
+        self._conn.execute(
+            f"UPDATE conversation_turns SET {set_clause} WHERE id = ?",
+            (*fields.values(), turn_id),
+        )
+        self._conn.commit()
+
+    def list_turns(self, session_id: str) -> List[Dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT id, session_id, sequence, kind, user_message, assistant_answer, "
+            "execution_snapshot, status, created_at, updated_at "
+            "FROM conversation_turns WHERE session_id = ? ORDER BY sequence ASC",
+            (session_id,),
+        ).fetchall()
+        turns: List[Dict[str, Any]] = []
+        for row in rows:
+            turns.append({
+                "id": row[0],
+                "sessionId": row[1],
+                "sequence": row[2],
+                "kind": row[3],
+                "userMessage": json.loads(row[4]) if row[4] else None,
+                "assistantAnswer": row[5],
+                "execution": json.loads(row[6]) if row[6] else None,
+                "status": row[7],
+                "createdAt": row[8],
+                "updatedAt": row[9],
+            })
+        return turns
+
+    def get_session_status(self, session_id: str) -> str:
+        """会话状态 = 最新一个 Turn 的状态（无 Turn 时为 idle）。"""
+        row = self._conn.execute(
+            "SELECT status FROM conversation_turns WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return "idle"
+        return str(row[0] or "idle")
 
     def close(self) -> None:
         try:

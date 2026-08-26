@@ -1,11 +1,13 @@
 import type { ExecutionEvent } from '../types/events'
-import type { AgentId, ExecutionState, NarrativeUpdate, TimelineItem, ToolUse } from '../types/execution'
+import type { AgentId, EvidenceItem, ExecutionState, NarrativeUpdate, TimelineItem, ToolUse } from '../types/execution'
 
-export const initialExecutionState: ExecutionState = {
+export const createInitialExecutionState = (): ExecutionState => ({
   status: 'idle', phase: 'idle', activeAgent: 'planner', tasks: [], timeline: [], tools: [], evidence: [],
   findings: [], completedSteps: [], keyFindings: [], narrativeUpdates: [], keyProgress: [], report: '', currentActivity: '', assistantReply: '', finalAnswer: '', lastAssistantOutput: '', lastStreamAgent: null, startedAt: null, endedAt: null, totalSteps: 0, reason: '',
   error: null, executionExpanded: true, connection: 'idle',
-}
+})
+
+export const initialExecutionState: ExecutionState = createInitialExecutionState()
 
 const line = (state: ExecutionState, item: Omit<TimelineItem, 'id' | 'at'>): TimelineItem => ({
   ...item,
@@ -82,7 +84,7 @@ const progressFromTool = (name: string, result: string) => {
 }
 export function executionReducer(state: ExecutionState, event: ExecutionEvent): ExecutionState {
   switch (event.type) {
-    case 'ui:reset': return { ...initialExecutionState }
+    case 'ui:reset': return createInitialExecutionState()
     case 'ui:toggle-execution': return { ...state, executionExpanded: !state.executionExpanded }
     case 'ui:connection': return { ...state, connection: event.data.connection }
     case 'engine:start':
@@ -122,7 +124,7 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
         ...state,
         phase: 'executing', currentActivity: `${name} 已完成`, executionExpanded: true,
         tools: finishTool(state.tools, name, result),
-        evidence: result ? [...state.evidence, { source: name, summary: result }] : state.evidence,
+        // Evidence 只来自显式 engine:evidence 事件，普通 Tool Result 不再自动进入 Evidence
         keyFindings: appendMany(state.keyFindings, progressFromTool(name, result).filter((item) => item.startsWith('已识别') || item.startsWith('发现') || item.includes('检出'))),
         keyProgress: appendMany(state.keyProgress, progressFromTool(name, result)),
         timeline: [...state.timeline, line(state, { kind: 'tool', agent: event.data.agent_id ?? state.activeAgent, title: `${name} 已完成`, detail: result.slice(0, 180), status: 'completed' })],
@@ -158,6 +160,24 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
       const error = event.data.error ?? '引擎执行失败'
       return { ...state, status: 'error', phase: 'error', error, endedAt: Date.now(), finalAnswer: state.lastAssistantOutput || `任务执行失败：${error}`, narrativeUpdates: appendNarrative(state.narrativeUpdates, `执行失败：${error}`, event.data.agent_id ?? state.activeAgent), executionExpanded: true, timeline: [...state.timeline, line(state, { kind: 'error', title: '执行错误', detail: error, status: 'error' })] }
     }
+    case 'engine:evidence': {
+      const evidence = event.data.evidence
+      if (!evidence) return state
+      const exists = state.evidence.some((item) => item.id === evidence.id || (item.source === evidence.source && item.summary === evidence.summary))
+      if (exists) return state
+      const record: EvidenceItem = {
+        id: evidence.id ?? `evidence-${state.evidence.length + 1}`,
+        type: evidence.type,
+        title: evidence.title,
+        source: evidence.source ?? '未知来源',
+        summary: evidence.summary ?? '',
+        timestamp: evidence.timestamp,
+        metadata: evidence.metadata,
+      }
+      return { ...state, evidence: [...state.evidence, record] }
+    }
+    case 'persistence:warning':
+      return state
     case 'engine:end': {
       const reason = event.data.reason ?? 'completed'
       const status = reason === 'cancelled' ? 'cancelled' : reason === 'completed' ? 'completed' : 'error'

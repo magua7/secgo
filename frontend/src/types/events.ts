@@ -1,7 +1,7 @@
-import type { AgentId } from './execution'
+import type { AgentId, EvidenceItem } from './execution'
 import type { TodoItem } from './session'
 
-interface BaseData { session_id?: string; _event?: string }
+interface BaseData { session_id?: string; turn_id?: string; _event?: string }
 export interface EngineStartData extends BaseData { user_input?: string }
 export interface AgentThinkingData extends BaseData { agent_id?: AgentId }
 export interface AgentSwitchData extends BaseData { from_agent_id?: AgentId; to_agent_id?: AgentId; reason?: string }
@@ -12,6 +12,8 @@ export interface ErrorData extends BaseData { agent_id?: AgentId; error?: string
 export interface TodoData extends BaseData { todo_list?: TodoItem[] }
 export interface AwaitingData extends BaseData { agent_id?: AgentId; message?: string }
 export interface BudgetData extends BaseData { usage?: number; limit?: number }
+export interface EvidenceData extends BaseData { evidence?: EvidenceItem }
+export interface PersistenceWarningData extends BaseData { error?: string }
 
 export type ExecutionEvent =
   | { type: 'engine:start'; data: EngineStartData }
@@ -24,6 +26,8 @@ export type ExecutionEvent =
   | { type: 'engine:user_input'; data: BaseData & { input?: string } }
   | { type: 'engine:error'; data: ErrorData }
   | { type: 'budget:exceeded'; data: BudgetData }
+  | { type: 'engine:evidence'; data: EvidenceData }
+  | { type: 'persistence:warning'; data: PersistenceWarningData }
   | { type: 'engine:end'; data: EndData }
   | { type: 'ui:reset'; data: BaseData }
   | { type: 'ui:toggle-execution'; data: BaseData }
@@ -33,7 +37,7 @@ export const SSE_EVENT_NAMES = [
   'engine:start', 'agent:thinking', 'agent:switch', 'tool:call', 'tool:result',
   'llm:stream', 'engine:text', 'engine:end', 'budget:exceeded', 'engine:error',
   'todo:updated', 'tool:stream-start', 'tool:stream-end', 'engine:awaiting_input',
-  'engine:user_input',
+  'engine:user_input', 'engine:evidence', 'persistence:warning',
 ] as const
 
 export type SseEventName = typeof SSE_EVENT_NAMES[number]

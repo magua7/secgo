@@ -2,7 +2,6 @@ import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup } from '@testing-library/react'
 import { ExecutionBlock } from './ExecutionBlock'
-import { historyMessagesToTurns } from './conversationAdapter'
 import { initialExecutionState } from '../../state/executionReducer'
 
 describe('ExecutionBlock', () => {
@@ -16,9 +15,16 @@ describe('ExecutionBlock', () => {
     expect(onToggle).toHaveBeenCalledOnce()
   })
 
+  it('labels an expanded completed execution as completed, never as running', () => {
+    render(<ExecutionBlock state={{ ...initialExecutionState, status: 'completed', phase: 'completed', executionExpanded: true, startedAt: 1_000, endedAt: 3_000, currentActivity: 'planner 正在调用 task_complete', tasks: [{ text: '侦察', done: true }] }} />)
+    expect(screen.getByText(/研判完成/)).toBeInTheDocument()
+    expect(screen.queryByText(/正在执行安全研判/)).not.toBeInTheDocument()
+    expect(screen.getByText('最后活动')).toBeInTheDocument()
+  })
+
   it('collapses reporting into a truthful final-report transition summary', () => {
     render(<ExecutionBlock state={{ ...initialExecutionState, status: 'running', phase: 'reporting', executionExpanded: false, startedAt: 1_000, endedAt: null }} />)
-    expect(screen.getByText(/研判完成，正在生成报告/)).toBeInTheDocument()
+    expect(screen.getByText(/正在生成报告/)).toBeInTheDocument()
   })
 
   it('shows current activity, the latest four narration items, key progress and stats without a duplicate trace action', () => {
@@ -90,29 +96,5 @@ describe('ExecutionBlock', () => {
     }} />)
     expect(screen.getByText('权限验证').tagName).toBe('STRONG')
     expect(screen.queryByText(/\*\*权限验证\*\*/)).not.toBeInTheDocument()
-  })
-
-  it('does not invent a zero evidence count for historical execution', () => {
-    const turn = historyMessagesToTurns([
-      { kind: 'user', text: '检查 example.com' },
-      { kind: 'tool', text: '[工具结果 execute_bash]: ok' },
-    ])[0]
-    render(<ExecutionBlock presentation={turn?.execution ?? undefined} />)
-    expect(screen.queryByText(/0 Evidence|0 证据/)).not.toBeInTheDocument()
-  })
-
-  it('restores persisted Agent narration when a historical execution is expanded', () => {
-    const turn = historyMessagesToTurns([
-      { kind: 'user', text: '检查 example.com' },
-      { kind: 'assistant', text: '正在进行 **技术栈识别**' },
-      { kind: 'tool', text: '[工具结果 execute_bash]: 443 open' },
-    ])[0]
-    const presentation = turn?.execution ? { ...turn.execution, expanded: true } : undefined
-
-    render(<ExecutionBlock presentation={presentation} />)
-
-    expect(screen.getByText('当前活动')).toBeInTheDocument()
-    expect(screen.getByText('过程播报')).toBeInTheDocument()
-    expect(screen.getByText('技术栈识别').tagName).toBe('STRONG')
   })
 })

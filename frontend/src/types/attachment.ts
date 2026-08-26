@@ -1,5 +1,14 @@
 export type AttachmentStatus = 'pending' | 'uploading' | 'uploaded' | 'error'
 
+// 用户消息里展示的结构化附件（不含 SHA256 / 服务器路径等内部信息）
+export interface MessageAttachment {
+  id: string
+  filename: string
+  mimeType: string
+  kind: string
+  size: number
+}
+
 export interface PendingAttachment {
   id: string
   file: File

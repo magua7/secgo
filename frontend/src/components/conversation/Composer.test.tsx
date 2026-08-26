@@ -28,7 +28,7 @@ describe('Composer attachments', () => {
     await screen.findByText(/已上传/)
     await userEvent.click(screen.getByRole('button', { name: '发送' }))
 
-    expect(onSend).toHaveBeenCalledWith('', ['attachment-1'])
+    expect(onSend).toHaveBeenCalledWith('', ['attachment-1'], [{ id: 'attachment-1', filename: 'a.png', mimeType: 'image/png', kind: 'image', size: 3 }])
     expect(screen.queryByText('a.png')).not.toBeInTheDocument()
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:image')
   })

@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import logging
 import os
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
@@ -11,6 +13,7 @@ from ..model.provider import stream_agent_response
 from ..runtime.budget import BudgetManager, estimate_messages_tokens, estimate_tokens
 from ..runtime.eventbus import event_bus, set_current_session
 from ..runtime.session import SessionManager, resolve_session_db_path
+from ..runtime.snapshot import classify_tool_evidence
 from ..tools.executor import execute_tool
 from ..tools.mcp_client import mcp_client
 from ..tools.registry import (
@@ -31,6 +34,32 @@ from .pipeline import (
     should_summarize,
     summarize_messages,
 )
+
+logger = logging.getLogger("secgo.session")
+
+
+def _save_state_with_retry(manager: SessionManager, session_id: str, state: Dict[str, Any], attempts: int = 3) -> bool:
+    """关键执行状态落库：失败必须可见（log + 重试 + persistence:warning），绝不静默吞掉。"""
+    last: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            manager.save_state(session_id, state)
+            return True
+        except Exception as exc:  # 不 pass：记录并重试
+            last = exc
+            logger.exception(
+                "session persistence failure (attempt %d) for %s", attempt + 1, session_id
+            )
+            if attempt < attempts - 1:
+                time.sleep(0.05 * (attempt + 1))
+    try:
+        event_bus.emit("persistence:warning", {
+            "session_id": session_id,
+            "error": (str(last)[:300] if last else "unknown persistence error"),
+        })
+    except Exception:
+        logger.exception("failed to emit persistence:warning")
+    return False
 
 
 def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -173,31 +202,10 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
     sid = session_id or str(uuid.uuid4())
     set_current_session(sid)
 
-    event_bus.emit("engine:start", {"session_id": session_id, "user_input": user_input})
-
     budget_manager = BudgetManager(get_config().budget.maxTokensPerSession)
 
     db_path = resolve_session_db_path()
     session_manager = SessionManager(db_path)
-
-    # 状态保存合并：同一步内的多次保存只保留最新状态，落库推迟到步骤边界/退出前
-    # （事件循环内每步至多序列化一次；最后一步的保存由 finally 兜底落库，不丢失）
-    pending_save: Optional[Dict[str, Any]] = None
-
-    def save_session_state(state: Dict[str, Any]) -> None:
-        nonlocal pending_save
-        pending_save = state
-
-    def flush_pending_save() -> None:
-        nonlocal pending_save
-        if pending_save is None:
-            return
-        state = pending_save
-        pending_save = None
-        try:
-            session_manager.save_state(sid, state)
-        except Exception:
-            pass
 
     active_agent_id = "planner"
     messages: List[Dict[str, Any]] = [{"role": "user", "content": user_input}]
@@ -212,6 +220,31 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
         todo_list = saved_state.get("todoList")
         if todo_list:
             todo_tracker.restore(list(todo_list))
+
+    # 状态保存合并：同一步内的多次保存只保留最新状态，落库推迟到步骤边界/退出前
+    # （事件循环内每步至多序列化一次；最后一步的保存由 finally 兜底落库，不丢失）
+    pending_save: Optional[Dict[str, Any]] = None
+
+    def save_session_state(state: Dict[str, Any]) -> None:
+        nonlocal pending_save
+        pending_save = state
+
+    def flush_pending_save() -> None:
+        nonlocal pending_save
+        state = pending_save
+        pending_save = None
+        if state is None:
+            # 无待保存状态（如引擎异常崩溃）时也构造一份，保证 engine context 兜底落库
+            state = {
+                "activeAgentId": active_agent_id,
+                "messages": messages,
+                "stepCount": step_count,
+                "todoList": todo_tracker.get_all_tasks(),
+            }
+        _save_state_with_retry(session_manager, sid, state)
+
+    # 修正：engine:start 必须携带解析后的 sid（原实现传的是可能为 None 的入参 session_id）
+    event_bus.emit("engine:start", {"session_id": sid, "user_input": user_input})
 
     try:
         while step_count < get_config().budget.maxStepsPerTask:
@@ -243,6 +276,12 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "session_id": sid,
                     "reason": "budget_exceeded",
                     "total_steps": step_count,
+                })
+                save_session_state({
+                    "activeAgentId": active_agent_id,
+                    "messages": messages,
+                    "stepCount": step_count,
+                    "todoList": todo_tracker.get_all_tasks(),
                 })
                 return {"reason": "budget_exceeded", "total_steps": step_count}
 
@@ -335,6 +374,12 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "session_id": sid,
                     "reason": "error",
                     "total_steps": step_count,
+                })
+                save_session_state({
+                    "activeAgentId": active_agent_id,
+                    "messages": messages,
+                    "stepCount": step_count,
+                    "todoList": todo_tracker.get_all_tasks(),
                 })
                 return {"reason": "error", "total_steps": step_count}
 
@@ -435,13 +480,13 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "todoList": todo_tracker.get_all_tasks(),
                     "completionSummary": summary,
                 })
-                flush_pending_save()
                 event_bus.emit("engine:end", {
                     "session_id": sid,
                     "reason": "completed",
                     "total_steps": step_count,
                     "summary": summary,
                 })
+                flush_pending_save()
                 return {
                     "reason": "completed",
                     "total_steps": step_count,
@@ -542,6 +587,14 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "result": result.get("output") if result.get("success") else result.get("error"),
                 })
 
+                # 只有明确属于证据语义的工具结果才产出 Evidence；普通 Tool Result 不进 Evidence
+                evidence_record = classify_tool_evidence(tc["name"], result)
+                if evidence_record is not None:
+                    event_bus.emit("engine:evidence", {
+                        "session_id": sid,
+                        "evidence": evidence_record,
+                    })
+
                 compacted = compact_tool_output(tc["name"], result)
                 removed = max(
                     0,
@@ -597,6 +650,12 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 "message": response.text or "",
             })
 
+            save_session_state({
+                "activeAgentId": active_agent_id,
+                "messages": messages,
+                "stepCount": step_count,
+                "todoList": todo_tracker.get_all_tasks(),
+            })
             flush_pending_save()  # 挂起等待输入前落库，避免长挂起期间状态仅存于内存
             new_user_input = await _wait_for_user_input(sid)
             event_bus.emit("engine:user_input", {
@@ -611,8 +670,14 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
             "reason": "max_steps",
             "total_steps": step_count,
         })
+        save_session_state({
+            "activeAgentId": active_agent_id,
+            "messages": messages,
+            "stepCount": step_count,
+            "todoList": todo_tracker.get_all_tasks(),
+        })
         return {"reason": "max_steps", "total_steps": step_count}
     finally:
         cancel_waiting_input(sid)
-        flush_pending_save()  # 兜底：最后一步的保存必须落库
+        flush_pending_save()  # 兜底：最后一步的 engine context 保存必须落库
         session_manager.close()

@@ -216,13 +216,19 @@ class InputResolverTests(unittest.IsolatedAsyncioTestCase):
         server._channels.pop(session_id, None)
         server._tasks.pop(session_id, None)
 
+        events = []
+        def _capture(data):
+            events.append(data)
+        server.event_bus.on("engine:end", _capture)
+
         response = await server.api_cancel_session(session_id)
 
+        server.event_bus.off("engine:end", _capture)
         self.assertEqual(response.status_code, 200)
         self.assertFalse(handoff_engine.is_engine_awaiting_input(session_id))
         with self.assertRaises(asyncio.CancelledError):
             await waiting
-        channel = server._channels[session_id]
-        self.assertEqual(channel.ring[-1][1], "engine:end")
-        self.assertEqual(channel.ring[-1][2]["reason"], "cancelled")
-        server._channels.pop(session_id, None)
+        self.assertTrue(any(
+            event.get("session_id") == session_id and event.get("reason") == "cancelled"
+            for event in events
+        ))

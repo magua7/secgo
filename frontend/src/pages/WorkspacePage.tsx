@@ -1,32 +1,27 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import type { Theme } from '../hooks/preferences'
-import { useAgentExecution } from '../hooks/useAgentExecution'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useExecutionRegistry } from '../hooks/useExecutionRegistry'
 import { usePanelPreferences } from '../hooks/preferences'
 import { cancelSession, deleteSession, getSessionMessages, getSessions, handleApiError, renameSession, sendChat } from '../services/api'
-import type { HistoryMessage, SessionSummary, TodoItem } from '../types/session'
+import type { SessionSummary, PersistedTurn } from '../types/session'
 import type { ExecutionTraceTab } from '../types/executionTrace'
 import type { ConversationTurn } from '../types/conversation'
+import type { MessageAttachment } from '../types/attachment'
 import { ConversationFeed } from '../components/conversation/ConversationFeed'
 import { Composer } from '../components/conversation/Composer'
 import { TasksDock } from '../components/execution/TasksDock'
 import { Sidebar } from '../components/layout/Sidebar'
 import { RightPanel } from '../components/layout/RightPanel'
-import { Brand } from '../components/common/Brand'
-import { Icon } from '../components/common/Icon'
-import { ThemeToggle } from '../components/common/ThemeToggle'
-import { historyMessagesToTrace, liveExecutionToTrace } from '../components/layout/executionTraceAdapter'
-import { commitVisibleLiveTurn, liveExecutionToTurn } from '../components/conversation/conversationAdapter'
+import { executionSnapshotToTraceView, liveExecutionToTrace } from '../components/layout/executionTraceAdapter'
+import { liveExecutionToTurn, persistedTurnsToConversationTurns } from '../components/conversation/conversationAdapter'
 import { isNearBottom, shouldFollowStreamUpdate } from '../utils/autoFollow'
 import { executionForTurnSubmission } from '../utils/turnSubmission'
 
+const activeStatuses = new Set(['queued', 'running', 'awaiting_user'])
 
 export function WorkspacePage() {
-  const [sessionId, setSessionId] = useState<string | null>(() => sessionStorage.getItem('secgo.sessionId'))
   const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [messages, setMessages] = useState<HistoryMessage[]>([])
-  const [historyTodoList, setHistoryTodoList] = useState<TodoItem[]>([])
-  const [committedTurns, setCommittedTurns] = useState<ConversationTurn[]>([])
-  const [question, setQuestion] = useState(() => sessionStorage.getItem('secgo.pendingQuestion') ?? '')
+  const [persistedTurns, setPersistedTurns] = useState<PersistedTurn[]>([])
+  const [liveTurnId, setLiveTurnId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [rightTab, setRightTab] = useState<ExecutionTraceTab>('trace')
@@ -34,35 +29,73 @@ export function WorkspacePage() {
   const [submitting, setSubmitting] = useState(false)
   const [turnFailed, setTurnFailed] = useState(false)
   const { leftMode, cycleLeft, rightVisible, setRightVisible } = usePanelPreferences()
-  const { state, reset, toggleExecution } = useAgentExecution(sessionId)
+  const { selectedId, selectedState, runtimes, startSession, selectSession, resetSession, toggleSession } = useExecutionRegistry()
   const feedRef = useRef<HTMLDivElement>(null)
   const autoFollowRef = useRef(true)
   const previousFinalTextRef = useRef('')
   const submissionStartedRef = useRef(false)
-  const displayedExecution = executionForTurnSubmission(state, submitting ? 'pending' : turnFailed ? 'failed' : null)
-  const running = submitting || state.status === 'running' || state.status === 'loading'
-  const activeTitle = sessions.find((session) => session.id === sessionId)?.title || (question ? question.slice(0, 48) : '新建任务')
-  const showTaskStatus = Boolean(sessionId || question || state.status !== 'idle')
-  const liveTurn = useMemo(() => liveExecutionToTurn(question, displayedExecution), [question, displayedExecution])
-  const liveTrace = useMemo(() => liveExecutionToTrace(displayedExecution), [displayedExecution])
-  const historyTrace = useMemo(() => historyMessagesToTrace(messages, historyTodoList), [messages, historyTodoList])
-  const rightTrace = question ? liveTrace : historyTrace
+
+  const displayedExecution = executionForTurnSubmission(selectedState, submitting ? 'pending' : turnFailed ? 'failed' : null)
+  const running = submitting || selectedState.status === 'running' || selectedState.status === 'loading'
+  const mappedTurns = useMemo(() => persistedTurnsToConversationTurns(persistedTurns), [persistedTurns])
+  const liveTurn = useMemo<ConversationTurn | null>(() => {
+    if (!liveTurnId) return null
+    const persisted = persistedTurns.find((turn) => turn.id === liveTurnId)
+    const question = persisted?.userMessage?.text ?? ''
+    const attachments = persisted?.userMessage?.attachments
+    // 覆盖为真实 turnId：让 ConversationFeed 识别该 turn 为 live（传 onToggleExecution），
+    // 从而执行块使用 live executionExpanded（运行中展开），而不是被本地 historyExpanded 缓存成折叠。
+    return { ...liveExecutionToTurn(question, selectedState, attachments), id: liveTurnId }
+  }, [liveTurnId, persistedTurns, selectedState])
+  const displayTurns = useMemo(() => {
+    if (!liveTurn || !liveTurnId) return mappedTurns
+    return mappedTurns.map((turn) => (turn.id === liveTurnId ? liveTurn : turn))
+  }, [mappedTurns, liveTurn, liveTurnId])
+  const rightTrace = useMemo(() => {
+    if (liveTurn && liveTurnId) return liveExecutionToTrace(selectedState)
+    const lastAgent = [...persistedTurns].reverse().find((turn) => turn.kind === 'agent_task' && turn.execution)
+    if (lastAgent?.execution) return executionSnapshotToTraceView(lastAgent.execution)
+    return liveExecutionToTrace(selectedState)
+  }, [liveTurn, liveTurnId, selectedState, persistedTurns])
+  const activeTitle = sessions.find((session) => session.id === selectedId)?.title || '新建任务'
   const workspaceColumns = { '--workspace-left': leftMode === 'expanded' ? '250px' : '0px', '--workspace-right': rightVisible ? '340px' : '0px' } as CSSProperties
 
   const loadSessions = async () => { try { setSessions((await getSessions()).sessions) } catch (reason) { setError(handleApiError(reason)) } }
+  const reloadConversation = useCallback(async (sessionId: string) => {
+    try {
+      const result = await getSessionMessages(sessionId)
+      setPersistedTurns(result.turns)
+      const active = activeStatuses.has(result.status)
+      const last = result.turns.at(-1)
+      if (active && last) {
+        setLiveTurnId(last.id)
+        startSession(sessionId)
+      } else {
+        setLiveTurnId(null)
+      }
+    } catch (reason) { setError(handleApiError(reason)) }
+  }, [startSession])
   useEffect(() => { void loadSessions() }, [])
   useEffect(() => { sessionStorage.removeItem('secgo.pendingQuestion') }, [])
-  useEffect(() => { if (state.status === 'completed' || state.status === 'cancelled' || state.status === 'error') void loadSessions() }, [state.status])
+  const terminalCount = useMemo(() => Object.values(runtimes).filter((runtime) => ['completed', 'cancelled', 'error', 'awaiting_input'].includes(runtime.state.status)).length, [runtimes])
+  useEffect(() => { if (terminalCount > 0) void loadSessions() }, [terminalCount])
   useEffect(() => {
-    if (submitting && state.status === 'running') {
+    if (submitting && selectedState.status === 'running') {
       submissionStartedRef.current = true
       setSubmitting(false)
       setTurnFailed(false)
     }
-  }, [state.status, submitting])
+  }, [selectedState.status, submitting])
+  // 当前 live turn 到达终态（engine:end / engine:awaiting_input）后，从服务端刷新 conversation 与侧栏
   useEffect(() => {
-    const text = liveTurn.finalAnswer ?? ''
-    if (!liveTurn.isFinalStreaming || text === previousFinalTextRef.current) {
+    if (liveTurnId && ['completed', 'cancelled', 'error', 'awaiting_input'].includes(selectedState.status) && selectedId) {
+      void reloadConversation(selectedId)
+      void loadSessions()
+    }
+  }, [liveTurnId, selectedState.status, selectedId, reloadConversation])
+  useEffect(() => {
+    const text = liveTurn?.finalAnswer ?? ''
+    if (!liveTurn?.isFinalStreaming || text === previousFinalTextRef.current) {
       previousFinalTextRef.current = text
       return
     }
@@ -72,30 +105,61 @@ export function WorkspacePage() {
       setShowLatest(false)
     } else if (feed) setShowLatest(true)
     previousFinalTextRef.current = text
-  }, [liveTurn.finalAnswer, liveTurn.isFinalStreaming])
+  }, [liveTurn?.finalAnswer, liveTurn?.isFinalStreaming])
   useEffect(() => {
     const feed = feedRef.current
-    if (feed && !autoFollowRef.current && (state.timeline.length || state.keyProgress.length)) setShowLatest(true)
-  }, [state.timeline.length, state.keyProgress.length, state.currentActivity])
+    if (feed && !autoFollowRef.current && (selectedState.timeline.length || selectedState.keyProgress.length)) setShowLatest(true)
+  }, [selectedState.timeline.length, selectedState.keyProgress.length, selectedState.currentActivity])
+
+  useEffect(() => {
+    const stored = sessionStorage.getItem('secgo.sessionId')
+    if (stored) void select(stored)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const select = async (id: string) => {
-    setLoading(true); setError(''); reset(); setQuestion(''); setCommittedTurns([]); setSessionId(id); sessionStorage.setItem('secgo.sessionId', id)
+    setLoading(true); setError(''); selectSession(id); sessionStorage.setItem('secgo.sessionId', id)
     try {
-      const result = await getSessionMessages(id)
-      setMessages(result.messages); setHistoryTodoList(result.todoList)
+      await reloadConversation(id)
       requestAnimationFrame(() => feedRef.current?.scrollTo({ top: 0 }))
     }
     catch (reason) { setError(handleApiError(reason)) } finally { setLoading(false) }
   }
-  const create = () => { reset(); setSessionId(null); setMessages([]); setHistoryTodoList([]); setCommittedTurns([]); setQuestion(''); sessionStorage.removeItem('secgo.sessionId') }
-  const send = async (text: string, attachmentIds: string[]) => {
+  const create = () => {
+    selectSession(null); setPersistedTurns([]); setLiveTurnId(null)
+    sessionStorage.removeItem('secgo.sessionId')
+  }
+  const send = async (text: string, attachmentIds: string[], attachments: MessageAttachment[]) => {
     const questionText = text || '请分析这些附件。'
-    setCommittedTurns((turns) => commitVisibleLiveTurn(turns, question, displayedExecution))
-    submissionStartedRef.current = false; setSubmitting(true); setTurnFailed(false); setQuestion(questionText); setError(''); autoFollowRef.current = true; setShowLatest(false)
+    const targetId = selectedId
+    submissionStartedRef.current = false; setSubmitting(true); setTurnFailed(false); setError(''); autoFollowRef.current = true; setShowLatest(false)
     requestAnimationFrame(() => { const feed = feedRef.current; if (feed) feed.scrollTo({ top: feed.scrollHeight }) })
     try {
-      const result = await sendChat(text, sessionId ?? undefined, attachmentIds)
-      if (!sessionId) { setSessionId(result.sessionId); sessionStorage.setItem('secgo.sessionId', result.sessionId) }
+      const result = await sendChat(text, targetId ?? undefined, attachmentIds)
+      const id = result.sessionId
+      const turnId = result.turnId
+      if (id) {
+        startSession(id)
+        resetSession(id)
+        if (!targetId) {
+          selectSession(id)
+          sessionStorage.setItem('secgo.sessionId', id)
+          setSessions((previous) => [{ id, title: questionText.slice(0, 30), messageCount: 0, stepCount: 0, status: 'queued', createdAt: Date.now(), updatedAt: Date.now() }, ...previous.filter((session) => session.id !== id)])
+        }
+        // 乐观追加新 Turn（普通 direct_response 也是正式 Turn），等待 SSE 实时更新其 execution
+        if (turnId) {
+          setPersistedTurns((previous) => {
+            if (previous.some((turn) => turn.id === turnId)) return previous
+            return [...previous, {
+              id: turnId, sessionId: id, sequence: previous.length + 1,
+              kind: 'direct_response', userMessage: { text: questionText, attachments },
+              assistantAnswer: null, execution: null, status: 'running',
+              createdAt: Date.now(), updatedAt: Date.now(),
+            }]
+          })
+          setLiveTurnId(turnId)
+        }
+      }
       await loadSessions()
     } catch (reason) {
       if (!submissionStartedRef.current) { setSubmitting(false); setTurnFailed(true) }
@@ -103,9 +167,9 @@ export function WorkspacePage() {
       throw reason
     }
   }
-  const stop = async () => { if (sessionId) try { await cancelSession(sessionId) } catch (reason) { setError(handleApiError(reason)) } }
+  const stop = async () => { if (selectedId) try { await cancelSession(selectedId) } catch (reason) { setError(handleApiError(reason)) } }
   const rename = async (session: SessionSummary) => { const title = window.prompt('会话新标题：', session.title); if (title?.trim()) { await renameSession(session.id, title.trim()); await loadSessions() } }
-  const remove = async (session: SessionSummary) => { if (!window.confirm('删除该会话？此操作不可恢复。')) return; await deleteSession(session.id); if (session.id === sessionId) create(); await loadSessions() }
+  const remove = async (session: SessionSummary) => { if (!window.confirm('删除该会话？此操作不可恢复。')) return; await deleteSession(session.id); if (session.id === selectedId) create(); await loadSessions() }
   const onFeedScroll = () => {
     const feed = feedRef.current
     if (!feed) return
@@ -122,9 +186,9 @@ export function WorkspacePage() {
 
   return <div className="workspace-page" style={{ ...workspaceColumns, width: "100%", height: "100%", overflow: "hidden" }}>
     <div className="workspace-body">
-      <div className={`panel-shell left-panel-shell ${leftMode}`}><Sidebar mode={leftMode} sessions={sessions} currentId={sessionId} onCycle={cycleLeft} onNew={create} onSelect={(id) => void select(id)} onRename={(session) => void rename(session)} onDelete={(session) => void remove(session)} onSettings={()=>{}} /><button className="panel-edge-handle left" onClick={cycleLeft} aria-label={leftMode === 'hidden' ? '展开历史侧栏' : '折叠历史侧栏'}>{leftMode === 'hidden' ? '›' : '‹'}</button></div>
+      <div className={`panel-shell left-panel-shell ${leftMode}`}><Sidebar mode={leftMode} sessions={sessions} currentId={selectedId} onCycle={cycleLeft} onNew={create} onSelect={(id) => void select(id)} onRename={(session) => void rename(session)} onDelete={(session) => void remove(session)} onSettings={()=>{}} /><button className="panel-edge-handle left" onClick={cycleLeft} aria-label={leftMode === 'hidden' ? '展开历史侧栏' : '折叠历史侧栏'}>{leftMode === 'hidden' ? '›' : '‹'}</button></div>
       <main className="workspace-center">
-      <div className="workspace-scroll" ref={feedRef} onScroll={onFeedScroll}>{loading ? <div className="loading-state">正在加载会话…</div> : <ConversationFeed messages={messages} todoList={historyTodoList} committedTurns={committedTurns} currentQuestion={question} execution={displayedExecution} onToggleExecution={toggleExecution} />}{error && <div className="workspace-error">{error}</div>}</div>
+      <div className="workspace-scroll" ref={feedRef} onScroll={onFeedScroll}>{loading ? <div className="loading-state">正在加载会话…</div> : <ConversationFeed turns={displayTurns} liveTurnId={liveTurnId} onToggleExecution={() => { if (selectedId) toggleSession(selectedId) }} />}{error && <div className="workspace-error">{error}</div>}</div>
       {showLatest && <button className="return-latest" onClick={returnToLatest}>↓ 回到最新</button>}
       <div className="workspace-input"><TasksDock tasks={displayedExecution.tasks} status={displayedExecution.status} /><Composer running={running} onSend={send} onStop={stop} /></div>
       </main>
