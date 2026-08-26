@@ -1,4 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ExecutionTraceViewModel } from '../../types/executionTrace'
 import { RightPanel } from './RightPanel'
@@ -40,5 +41,55 @@ describe('RightPanel', () => {
     expect(screen.getAllByText('尚未开始任务').length).toBeGreaterThan(0)
     expect(screen.getByText(/提交安全任务后/)).toBeInTheDocument()
     expect(screen.queryByText('本轮为直接回复')).not.toBeInTheDocument()
+  })
+
+  it('renders a collapse button in the tabs row that invokes onCollapse', async () => {
+    const onCollapse = vi.fn()
+    const view: ExecutionTraceViewModel = {
+      mode: 'live', kind: 'empty', status: 'idle', activeAgent: 'planner',
+      timeline: [], evidence: [], resources: [], notice: null,
+    }
+    render(<RightPanel view={view} tab="trace" onTabChange={vi.fn()} onCollapse={onCollapse} />)
+    const collapse = screen.getByRole('button', { name: '收起执行面板' })
+    expect(collapse).toBeInTheDocument()
+    await userEvent.click(collapse)
+    expect(onCollapse).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the three tabs in a tablist and the collapse button outside it', () => {
+    const view: ExecutionTraceViewModel = {
+      mode: 'live', kind: 'empty', status: 'idle', activeAgent: 'planner',
+      timeline: [], evidence: [], resources: [], notice: null,
+    }
+    render(<RightPanel view={view} tab="trace" onTabChange={vi.fn()} onCollapse={vi.fn()} />)
+    const tablist = screen.getByRole('tablist')
+    const tabs = screen.getAllByRole('button', { name: /执行轨迹|证据|资源/ })
+    expect(tabs).toHaveLength(3)
+    tabs.forEach((tab) => expect(tablist).toContainElement(tab))
+    expect(tablist).not.toContainElement(screen.getByRole('button', { name: '收起执行面板' }))
+  })
+
+  it('keeps the collapse control in the tabs row, not the scrollable content', () => {
+    const view: ExecutionTraceViewModel = {
+      mode: 'live', kind: 'agent_task', status: 'running', activeAgent: 'operator',
+      timeline: [], evidence: [], resources: [], notice: null,
+    }
+    render(<RightPanel view={view} tab="trace" onTabChange={vi.fn()} onCollapse={vi.fn()} />)
+    const collapse = screen.getByRole('button', { name: '收起执行面板' })
+    expect(collapse.closest('.right-tabs-row')).not.toBeNull()
+    expect(collapse.closest('.right-content')).toBeNull()
+  })
+
+  it('shows the collapse control across direct/empty/running content states', () => {
+    const states: ExecutionTraceViewModel[] = [
+      { mode: 'live', kind: 'direct_response', status: 'idle', activeAgent: 'planner', timeline: [], evidence: [], resources: [], notice: null },
+      { mode: 'live', kind: 'empty', status: 'idle', activeAgent: 'planner', timeline: [], evidence: [], resources: [], notice: null },
+      { mode: 'live', kind: 'agent_task', status: 'running', activeAgent: 'operator', timeline: [], evidence: [], resources: [], notice: null },
+    ]
+    for (const view of states) {
+      const { unmount } = render(<RightPanel view={view} tab="trace" onTabChange={vi.fn()} onCollapse={vi.fn()} />)
+      expect(screen.getByRole('button', { name: '收起执行面板' })).toBeInTheDocument()
+      unmount()
+    }
   })
 })

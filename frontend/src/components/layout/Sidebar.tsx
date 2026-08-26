@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { LeftPanelMode } from '../../hooks/preferences'
 import type { SessionSummary } from '../../types/session'
 import { groupSessionsByDate } from '../../utils/sessionGroups'
 import { Icon } from '../common/Icon'
 import { SessionContextMenu } from './SessionContextMenu'
 
 interface Props {
-  mode: LeftPanelMode; sessions: SessionSummary[]; currentId: string | null
-  onCycle: () => void; onNew: () => void; onSelect: (id: string) => void
+  sessions: SessionSummary[]; currentId: string | null
+  onNew: () => void; onSelect: (id: string) => void
   onRename: (session: SessionSummary) => void; onDelete: (session: SessionSummary) => void; onSettings: () => void
 }
 
@@ -42,9 +41,7 @@ export function Sidebar(props: Props) {
     }
   }, [openMenu])
   useEffect(() => { if (openMenu && !props.sessions.some((session) => session.id === openMenu.session.id)) closeMenu() }, [openMenu, props.sessions])
-  useEffect(() => { if (props.mode === 'hidden') closeMenu() }, [props.mode])
-  if (props.mode === 'hidden') return null
-  return <aside className={`sidebar ${props.mode}`}>
+  return <aside className="sidebar expanded">
     <button className="new-task" onClick={props.onNew}><Icon name="plus" />新建任务</button>
     <label className="session-search"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索历史会话" /></label>
     <div className="session-list" onScroll={closeMenu}>{grouped.map((group) => <section key={group.label}>

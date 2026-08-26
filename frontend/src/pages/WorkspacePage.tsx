@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useExecutionRegistry } from '../hooks/useExecutionRegistry'
-import { usePanelPreferences } from '../hooks/preferences'
 import { useElapsedTime } from '../hooks/useElapsedTime'
 import { cancelSession, deleteSession, getSessionMessages, getSessions, handleApiError, renameSession, sendChat } from '../services/api'
 import type { SessionSummary, PersistedTurn } from '../types/session'
@@ -14,6 +13,7 @@ import { TasksDock } from '../components/execution/TasksDock'
 import { TaskStatusBar } from '../components/execution/TaskStatusBar'
 import { Sidebar } from '../components/layout/Sidebar'
 import { RightPanel } from '../components/layout/RightPanel'
+import { Icon } from '../components/common/Icon'
 import { executionSnapshotToTraceView, liveExecutionToTrace } from '../components/layout/executionTraceAdapter'
 import { hasAgentTaskSignals, liveExecutionToTurn, persistedTurnsToConversationTurns, selectTaskExecution } from '../components/conversation/conversationAdapter'
 import { isNearBottom, shouldFollowStreamUpdate } from '../utils/autoFollow'
@@ -21,7 +21,12 @@ import { executionForTurnSubmission } from '../utils/turnSubmission'
 
 const activeStatuses = new Set(['queued', 'running', 'awaiting_user'])
 
-export function WorkspacePage() {
+interface WorkspacePageProps {
+  rightVisible: boolean
+  setRightVisible: (visible: boolean) => void
+}
+
+export function WorkspacePage({ rightVisible, setRightVisible }: WorkspacePageProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [persistedTurns, setPersistedTurns] = useState<PersistedTurn[]>([])
   const [liveTurnId, setLiveTurnId] = useState<string | null>(null)
@@ -31,7 +36,6 @@ export function WorkspacePage() {
   const [showLatest, setShowLatest] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [turnFailed, setTurnFailed] = useState(false)
-  const { leftMode, cycleLeft, rightVisible, setRightVisible } = usePanelPreferences()
   const { selectedId, selectedState, runtimes, startSession, selectSession, resetSession, toggleSession } = useExecutionRegistry()
   const feedRef = useRef<HTMLDivElement>(null)
   const autoFollowRef = useRef(true)
@@ -71,7 +75,6 @@ export function WorkspacePage() {
     taskExecution?.endedAt ?? null,
     taskExecution?.status === 'running' || taskExecution?.status === 'loading',
   )
-  const workspaceColumns = { '--workspace-left': leftMode === 'expanded' ? '250px' : '0px', '--workspace-right': rightVisible ? '340px' : '0px' } as CSSProperties
 
   const loadSessions = async () => { try { setSessions((await getSessions()).sessions) } catch (reason) { setError(handleApiError(reason)) } }
   const reloadConversation = useCallback(async (sessionId: string) => {
@@ -195,17 +198,17 @@ export function WorkspacePage() {
     if (!feed) return
     autoFollowRef.current = true; setShowLatest(false); feed.scrollTo({ top: feed.scrollHeight })
   }
-  const toggleRightPanel = () => setRightVisible(!rightVisible)
-
-  return <div className="workspace-page" style={{ ...workspaceColumns, width: "100%", height: "100%", overflow: "hidden" }}>
+  return <div className="workspace-page">
     <div className="workspace-body">
-      <div className={`panel-shell left-panel-shell ${leftMode}`}><Sidebar mode={leftMode} sessions={sessions} currentId={selectedId} onCycle={cycleLeft} onNew={create} onSelect={(id) => void select(id)} onRename={(session) => void rename(session)} onDelete={(session) => void remove(session)} onSettings={()=>{}} /><button className="panel-edge-handle left" onClick={cycleLeft} aria-label={leftMode === 'hidden' ? '展开历史侧栏' : '折叠历史侧栏'}>{leftMode === 'hidden' ? '›' : '‹'}</button></div>
+      <div className="panel-shell left-panel-shell expanded"><Sidebar sessions={sessions} currentId={selectedId} onNew={create} onSelect={(id) => void select(id)} onRename={(session) => void rename(session)} onDelete={(session) => void remove(session)} onSettings={() => {}} /></div>
       <main className="workspace-center">
       <div className="workspace-scroll" ref={feedRef} onScroll={onFeedScroll}>{loading ? <div className="loading-state">正在加载会话…</div> : <ConversationFeed turns={displayTurns} liveTurnId={liveTurnId} onToggleExecution={() => { if (selectedId) toggleSession(selectedId) }} />}{error && <div className="workspace-error">{error}</div>}</div>
       {showLatest && <button className="return-latest" onClick={returnToLatest}>↓ 回到最新</button>}
       <div className="workspace-input"><TasksDock tasks={displayedExecution.tasks} status={displayedExecution.status} />{showTaskStatus && taskExecution && <TaskStatusBar status={taskExecution.status} phase={taskExecution.phase} activeAgent={taskExecution.activeAgent} currentActivity={taskExecution.currentActivity} elapsedMs={consoleElapsed} toolCount={taskExecution.tools.length} evidenceCount={taskExecution.evidence.length} />}<Composer running={running} onSend={send} onStop={stop} /></div>
       </main>
-      <div className={`panel-shell right-panel-shell ${rightVisible ? 'visible' : 'hidden'}`}><button className="panel-edge-handle right" onClick={toggleRightPanel} aria-label={rightVisible ? '折叠执行面板' : '展开执行面板'}>{rightVisible ? '›' : '‹'}</button>{rightVisible && <RightPanel view={rightTrace} tab={rightTab} onTabChange={setRightTab} />}</div>
+      {rightVisible
+        ? <div className="panel-shell right-panel-shell visible"><RightPanel view={rightTrace} tab={rightTab} onTabChange={setRightTab} onCollapse={() => setRightVisible(false)} /></div>
+        : <button type="button" className="right-panel-reopen-tab" onClick={() => setRightVisible(true)} aria-label="展开执行面板"><Icon name="chevron" /></button>}
     </div>
   </div>
 }

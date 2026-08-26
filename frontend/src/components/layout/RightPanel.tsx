@@ -1,6 +1,7 @@
 import type { ExecutionTraceTab, ExecutionTraceViewModel } from '../../types/executionTrace'
 import { AgentProgress } from '../execution/AgentProgress'
 import { PanelEmptyState } from '../common/PanelEmptyState'
+import { Icon } from '../common/Icon'
 
 const DetailText = ({ detail }: { detail: string }) => {
   const short = detail.length > 180 ? `${detail.slice(0, 180)}…` : detail
@@ -8,7 +9,7 @@ const DetailText = ({ detail }: { detail: string }) => {
   return <details className="history-raw-output"><summary>{short}</summary><pre className="history-trace-detail">{detail}</pre></details>
 }
 
-export function RightPanel({ view, tab, onTabChange }: { view: ExecutionTraceViewModel; tab: ExecutionTraceTab; onTabChange: (tab: ExecutionTraceTab) => void }) {
+export function RightPanel({ view, tab, onTabChange, onCollapse }: { view: ExecutionTraceViewModel; tab: ExecutionTraceTab; onTabChange: (tab: ExecutionTraceTab) => void; onCollapse?: () => void }) {
   const direct = view.kind === 'direct_response'
   const empty = view.kind === 'empty'
   const snapshotHistory = view.mode === 'history'
@@ -21,10 +22,13 @@ export function RightPanel({ view, tab, onTabChange }: { view: ExecutionTraceVie
           : <AgentProgress activeAgent={view.activeAgent} status={view.status} />}
           {snapshotHistory && <small className="history-badge">历史记录</small>}</>}
     </div>
-    <div className="right-tabs" role="tablist">
-      <button className={tab === 'trace' ? 'active' : ''} onClick={() => onTabChange('trace')}>执行轨迹</button>
-      <button className={tab === 'evidence' ? 'active' : ''} onClick={() => onTabChange('evidence')}>证据</button>
-      <button className={tab === 'resources' ? 'active' : ''} onClick={() => onTabChange('resources')}>资源</button>
+    <div className="right-tabs-row">
+      <div className="right-tabs" role="tablist">
+        <button className={tab === 'trace' ? 'active' : ''} onClick={() => onTabChange('trace')}>执行轨迹</button>
+        <button className={tab === 'evidence' ? 'active' : ''} onClick={() => onTabChange('evidence')}>证据</button>
+        <button className={tab === 'resources' ? 'active' : ''} onClick={() => onTabChange('resources')}>资源</button>
+      </div>
+      <button type="button" className="right-panel-collapse-btn" onClick={onCollapse} aria-label="收起执行面板"><Icon name="chevron" /></button>
     </div>
     <div className="right-content">
       {empty ? <PanelEmptyState title="尚未开始任务" detail="提交安全任务后，这里将展示 Agent 执行轨迹、工具调用与阶段变化。" /> : direct ? <PanelEmptyState title="本轮为直接回复" detail="未触发 Agent 执行或工具调用。" /> : <>

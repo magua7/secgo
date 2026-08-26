@@ -18,10 +18,8 @@ const rect = (top: number, bottom: number, right = 220): DOMRect => ({
 
 function renderSidebar(overrides: Partial<React.ComponentProps<typeof Sidebar>> = {}) {
   const props = {
-    mode: 'expanded' as const,
     sessions,
     currentId: null,
-    onCycle: vi.fn(),
     onNew: vi.fn(),
     onSelect: vi.fn(),
     onRename: vi.fn(),

@@ -2,14 +2,16 @@ import { useEffect, useState } from 'react'
 import { SettingsPanel } from '../components/common/SettingsPanel'
 // 导入现成的TopBar
 import { TopBar } from '../components/layout/TopBar'
-import { useTheme } from '../hooks/preferences'
+import { usePanelPreferences, useTheme } from '../hooks/preferences'
 import { HomePage } from '../pages/HomePage'
 import { WorkspacePage } from '../pages/WorkspacePage'
+import { shellPanelVars } from './shellLayout'
 
 
 
 export function App() {
   const { theme, toggleTheme } = useTheme()
+  const { rightVisible, setRightVisible } = usePanelPreferences()
   const [hash, setHash] = useState(window.location.hash || '#/')
   const [settings, setSettings] = useState(false)
 
@@ -23,10 +25,11 @@ export function App() {
 
   // 判断当前路由，传给TopBar做高亮
   const activeNav = hash.startsWith('#/workspace') ? 'workspace' : 'home'
+  const isWorkspace = hash.startsWith('#/workspace')
 
 
   return (
-  <div style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden" }}>
+  <div className="app-shell" style={{ display: "flex", flexDirection: "column", height: "100vh", width: "100vw", overflow: "hidden", ...shellPanelVars(isWorkspace, rightVisible) }}>
     <TopBar
       theme={theme}
       active={activeNav}
@@ -34,9 +37,9 @@ export function App() {
       onOpenSettings={() => setSettings(true)}
     />
 
-    <div style={{ flex: 1, overflow: "hidden" }}>
-      {hash.startsWith('#/workspace')
-        ? <WorkspacePage />
+    <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+      {isWorkspace
+        ? <WorkspacePage rightVisible={rightVisible} setRightVisible={setRightVisible} />
         : <HomePage />
       }
     </div>
