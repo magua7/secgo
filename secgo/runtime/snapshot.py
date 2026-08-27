@@ -45,7 +45,8 @@ def _bounded(value: Any, limit: int) -> str:
 
 
 def is_evidence_tool(tool_name: str) -> bool:
-    return tool_name in EVIDENCE_TOOLS or tool_name.startswith("mcp_")
+    # 只有明确白名单的工具才可能产出证据；工具名 mcp_ 前缀不代表结果天然是证据。
+    return tool_name in EVIDENCE_TOOLS
 
 
 _NO_RESULT_MARKERS = (
@@ -251,14 +252,14 @@ class RunSnapshotRecorder:
         elif event_type == "agent:thinking":
             agent = data.get("agent_id") or self.active_agent
             self.active_agent = agent
-            self.phase = "reporting" if agent == "builder" else ("planning" if agent == "planner" else "executing")
-            self.current_activity = "Builder 正在生成最终报告" if agent == "builder" else f"{agent} 正在执行"
+            self.phase = "planning" if agent == "planner" else "executing"
+            self.current_activity = f"{agent} 正在执行"
             self._add_timeline("agent", f"{agent} 正在执行", status="running", agent=agent)
         elif event_type == "agent:switch":
             to_agent = data.get("to_agent_id") or self.active_agent
             from_agent = data.get("from_agent_id") or "agent"
             self.active_agent = to_agent
-            self.phase = "reporting" if to_agent == "builder" else "executing"
+            self.phase = "executing"
             self.current_activity = f"{from_agent} 已移交 {to_agent}"
             self._append_unique(
                 self.key_progress,
@@ -319,10 +320,7 @@ class RunSnapshotRecorder:
             if not text:
                 return
             self.last_assistant_output = text
-            if agent == "builder":
-                self.final_report = text
-            else:
-                self._add_narrative(text, agent)
+            self._add_narrative(text, agent)
         elif event_type == "todo:updated":
             self.tasks = list(data.get("todo_list") or [])
         elif event_type == "engine:awaiting_input":

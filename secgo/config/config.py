@@ -78,6 +78,7 @@ class BudgetConfig:
     maxTokensPerSession: int
     maxStepsPerTask: int
     stepTimeoutMs: int
+    maxReplansPerRun: int
 
 
 @dataclass(frozen=False)
@@ -181,7 +182,7 @@ DEFAULT_CONFIG = AppConfig(
         agents={},
     ),
     mcp=McpConfig(servers=[], timeout=15_000),
-    budget=BudgetConfig(maxTokensPerSession=100_000, maxStepsPerTask=50, stepTimeoutMs=30_000),
+    budget=BudgetConfig(maxTokensPerSession=100_000, maxStepsPerTask=50, stepTimeoutMs=30_000, maxReplansPerRun=3),
     context=ContextConfig(
         contextWindow=32768,
         summaryThreshold=0.7,
@@ -490,11 +491,15 @@ def load_config() -> AppConfig:
             break
     context_window = _env_int("CONTEXT_WINDOW", context_window)
 
-    # run_limits（settings.json，zhiyugo 风格）：max_steps 映射为单任务最大步数
+    # run_limits（settings.json，zhiyugo 风格）：max_steps 映射为单次 Run 的最大步数（不是 Session 累计）
     run_limits = settings.get("run_limits") or {}
     max_steps = _env_int(
         "MAX_STEPS",
         int(run_limits.get("max_steps") or DEFAULT_CONFIG.budget.maxStepsPerTask),
+    )
+    max_replans = _env_int(
+        "MAX_REPLANS",
+        int(run_limits.get("max_replans") or DEFAULT_CONFIG.budget.maxReplansPerRun),
     )
 
     llm_cfg = LlmConfig(
@@ -524,6 +529,7 @@ def load_config() -> AppConfig:
             ),
             maxStepsPerTask=max_steps,
             stepTimeoutMs=_env_int("STEP_TIMEOUT_MS", DEFAULT_CONFIG.budget.stepTimeoutMs),
+            maxReplansPerRun=max_replans,
         ),
         context=ContextConfig(
             contextWindow=context_window,

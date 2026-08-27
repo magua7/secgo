@@ -167,6 +167,19 @@ class StrategySelectionTests(unittest.TestCase):
         self.assertEqual(selected.id, "c-b")  # 避开刚失败的 nmap
         self.assertEqual(len(rejected), 1)
 
+    def test_select_strategy_varies_with_trigger(self):
+        plan = PlanState(goal="t")
+        candidates = [
+            CandidateStrategy("c-a", "继续当前 Agent 换工具", "operator", ["nmap"], "low", "x"),
+            CandidateStrategy("c-b", "切到 Planner 重新规划", "planner", [], "medium", "x"),
+        ]
+        # excessive_failures：倾向回退 Planner
+        selected_exc, _ = plan.select_strategy(candidates, "excessive_failures", "operator")
+        self.assertEqual(selected_exc.id, "c-b")
+        # 普通 tool_failure（无失败工具记录）：低风险同 Agent 优先，稳定 tie-break 取第一个
+        selected_tf, _ = plan.select_strategy(candidates, "tool_failure", "operator")
+        self.assertEqual(selected_tf.id, "c-a")
+
 
 if __name__ == "__main__":
     unittest.main()

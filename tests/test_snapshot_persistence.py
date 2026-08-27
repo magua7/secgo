@@ -13,11 +13,13 @@ class EvidenceClassificationTests(unittest.TestCase):
         self.assertIsNone(classify_tool_evidence("execute_bash", {"success": True, "output": "x"}))
         self.assertIsNone(classify_tool_evidence("handoff_to_agent", {"success": True, "output": "x"}))
 
-    def test_web_search_and_mcp_are_evidence(self):
+    def test_web_search_is_evidence_but_mcp_prefix_is_not_auto_evidence(self):
         record = classify_tool_evidence("web_search", {"success": True, "output": "found"})
         self.assertIsNotNone(record)
         self.assertEqual(record["source"], "web_search")
-        self.assertIsNotNone(classify_tool_evidence("mcp_scan", {"success": True, "output": "found"}))
+        # mcp_ 前缀不再自动成为证据：工具来源 ≠ 证据成立
+        self.assertIsNone(classify_tool_evidence("mcp_scan", {"success": True, "output": "found"}))
+        self.assertIsNone(classify_tool_evidence("mcp_brave_search", {"success": True, "output": "[medium] XSS"}))
 
     def test_empty_output_is_not_evidence(self):
         self.assertIsNone(classify_tool_evidence("web_search", {"success": True, "output": "(no output)"}))

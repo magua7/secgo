@@ -45,6 +45,22 @@ class TurnPersistenceTests(unittest.TestCase):
         self.assertEqual(turn["assistantAnswer"], "# 最终报告")
         self.assertEqual(turn["execution"]["status"], "completed")
 
+    def test_decision_persists_in_turn_snapshot(self):
+        self.manager.create_turn("s1", "t-dec", 1, {"text": "task", "attachments": []}, "agent_task", "running")
+        turn_manager.start_turn("s1", "t-dec")
+        _emit("engine:start", {})
+        _emit("decision:reason", {
+            "decision": {
+                "id": "d1", "timestamp": 1000, "trigger": "tool_failure", "trigger_detail": "nmap 连续失败",
+                "observation": "原计划: x", "candidates": [], "selected": "", "reason": "换策略", "rejected": [],
+            },
+        })
+        _emit("engine:end", {"reason": "completed", "total_steps": 2})
+        turn = self.manager.list_turns("s1")[0]
+        self.assertEqual(turn["status"], "completed")
+        self.assertEqual(turn["execution"]["decisions"][0]["id"], "d1")
+        self.assertTrue(any(item.get("title") == "◆ 策略调整" for item in turn["execution"]["timeline"]))
+
     def test_direct_response_turn_finalizes_on_awaiting_input(self):
         self.manager.create_turn("s1", "t1", 1, {"text": "你好", "attachments": []}, "direct_response", "running")
         turn_manager.start_turn("s1", "t1")

@@ -66,14 +66,13 @@ describe('executionReducer', () => {
     expect(state.finalAnswer).toContain('未生成完整最终报告')
   })
 
-  it('uses the builder user-facing stream as the final answer without collapsing before reporting', () => {
-    let state = executionReducer(initialExecutionState, { type: 'todo:updated', data: { session_id: 's1', todo_list: [{ text: '生成报告', done: false }] } })
+  it('treats builder as an executing agent, not the report agent', () => {
+    let state = executionReducer(initialExecutionState, { type: 'todo:updated', data: { session_id: 's1', todo_list: [{ text: '编写 PoC', done: false }] } })
     state = executionReducer(state, { type: 'agent:thinking', data: { session_id: 's1', agent_id: 'builder' } })
-    state = executionReducer(state, { type: 'llm:stream', data: { session_id: 's1', agent_id: 'builder', chunk: '# 最终报告' } })
-    expect(state.phase).toBe('reporting')
-    expect(state.finalAnswer).toBe('# 最终报告')
-    state = executionReducer(state, { type: 'engine:end', data: { session_id: 's1', reason: 'completed', total_steps: 3 } })
-    expect(state.finalAnswer).toBe('# 最终报告')
+    state = executionReducer(state, { type: 'llm:stream', data: { session_id: 's1', agent_id: 'builder', chunk: '## PoC 脚本' } })
+    expect(state.phase).toBe('executing')
+    expect(state.finalAnswer).toBe('')
+    expect(state.currentActivity).toBe('builder 正在执行')
   })
 
   it('does not carry an intermediate tool-call stream into the final report', () => {

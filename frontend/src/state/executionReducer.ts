@@ -58,10 +58,7 @@ const updateStreamNarrative = (state: ExecutionState, value: string, agent: Agen
   return appendNarrative(state.narrativeUpdates, text, agent)
 }
 
-const archiveNarrative = (state: ExecutionState) => {
-  if (state.lastStreamAgent === 'builder') return state.narrativeUpdates
-  return appendNarrative(state.narrativeUpdates, state.report, state.lastStreamAgent ?? state.activeAgent)
-}
+const archiveNarrative = (state: ExecutionState) => appendNarrative(state.narrativeUpdates, state.report, state.lastStreamAgent ?? state.activeAgent)
 const capabilityLabels = (text: string) => {
   const labels: string[] = []
   if (/web|recon|侦察/i.test(text)) labels.push('Web 侦察')
@@ -94,13 +91,12 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
       }
     case 'agent:thinking': {
       const agent = event.data.agent_id ?? state.activeAgent
-      const reporting = agent === 'builder'
-      return { ...state, status: 'running', phase: reporting ? 'reporting' : agent === 'planner' ? 'planning' : 'executing', activeAgent: agent, currentActivity: reporting ? 'Builder 正在生成最终报告' : `${agent} 正在执行`, narrativeUpdates: archiveNarrative(state), report: '', assistantReply: '', executionExpanded: reporting ? false : true, timeline: [...state.timeline, line(state, { kind: 'agent', agent, title: `${agent} 正在执行`, status: 'running' })] }
+      return { ...state, status: 'running', phase: agent === 'planner' ? 'planning' : 'executing', activeAgent: agent, currentActivity: `${agent} 正在执行`, narrativeUpdates: archiveNarrative(state), report: '', assistantReply: '', executionExpanded: true, timeline: [...state.timeline, line(state, { kind: 'agent', agent, title: `${agent} 正在执行`, status: 'running' })] }
     }
     case 'agent:switch': {
       const agent = event.data.to_agent_id ?? state.activeAgent
       const action = `已将${event.data.reason ? `${event.data.reason}相关工作` : '当前阶段任务'}移交 ${agent}`
-      return { ...state, phase: agent === 'builder' ? 'reporting' : 'executing', activeAgent: agent, currentActivity: `${event.data.from_agent_id ?? 'agent'} 已移交 ${agent}`, executionExpanded: agent === 'builder' ? false : true, keyProgress: appendUnique(state.keyProgress, action), timeline: [...state.timeline, line(state, { kind: 'handoff', agent, title: `${event.data.from_agent_id ?? 'agent'} → ${agent}`, detail: event.data.reason })] }
+      return { ...state, phase: 'executing', activeAgent: agent, currentActivity: `${event.data.from_agent_id ?? 'agent'} 已移交 ${agent}`, executionExpanded: true, keyProgress: appendUnique(state.keyProgress, action), timeline: [...state.timeline, line(state, { kind: 'handoff', agent, title: `${event.data.from_agent_id ?? 'agent'} → ${agent}`, detail: event.data.reason })] }
     }
     case 'tool:call':
     case 'tool:stream-start': {
@@ -133,14 +129,13 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
     case 'llm:stream': {
       const agent = event.data.agent_id ?? state.activeAgent
       const report = state.report + (event.data.chunk ?? '')
-      const reporting = agent === 'builder'
-      return { ...state, phase: reporting ? 'reporting' : state.phase, report, assistantReply: report, lastStreamAgent: agent, finalAnswer: reporting ? report : state.finalAnswer, narrativeUpdates: reporting ? state.narrativeUpdates : updateStreamNarrative(state, report, agent), executionExpanded: reporting ? false : state.executionExpanded }
+      return { ...state, phase: state.phase, report, assistantReply: report, lastStreamAgent: agent, finalAnswer: state.finalAnswer, narrativeUpdates: updateStreamNarrative(state, report, agent), executionExpanded: state.executionExpanded }
     }
     case 'engine:text': {
       const text = event.data.text?.trim() ?? ''
       if (!text) return state
       const agent = event.data.agent_id ?? state.activeAgent
-      return { ...state, report: state.report || text, assistantReply: text, lastAssistantOutput: text, lastStreamAgent: agent, finalAnswer: agent === 'builder' ? text : state.finalAnswer, narrativeUpdates: agent === 'builder' ? state.narrativeUpdates : appendNarrative(state.narrativeUpdates, text, agent) }
+      return { ...state, report: state.report || text, assistantReply: text, lastAssistantOutput: text, lastStreamAgent: agent, finalAnswer: state.finalAnswer, narrativeUpdates: appendNarrative(state.narrativeUpdates, text, agent) }
     }
     case 'todo:updated': {
       const tasks = event.data.todo_list ?? []

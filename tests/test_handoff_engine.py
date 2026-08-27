@@ -53,7 +53,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         handoff_engine._input_resolvers.clear()
         self.events = []
         self.config = SimpleNamespace(
-            budget=SimpleNamespace(maxTokensPerSession=100_000, maxStepsPerTask=20),
+            budget=SimpleNamespace(maxTokensPerSession=100_000, maxStepsPerTask=20, maxReplansPerRun=3),
             llm=SimpleNamespace(subscriptions={"coding": SimpleNamespace()}, agents={}),
             context=SimpleNamespace(toolOutputMaxTokens=2000),
         )
@@ -187,9 +187,10 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[0] for call in tool.await_args_list], ["skill_list", "skill_read"])
 
     async def test_replan_exhaustion_notice_is_injected_once(self):
-        """达到 MAX_REPLANS 后，收尾指引只注入一次，后续触发条件被静默吞掉。"""
+        """达到 max_replans 后，收尾指引只注入一次，后续触发条件被静默吞掉。"""
         from secgo.kernel.plan_state import MAX_REPLANS, PlanState
 
+        self.config.budget.maxReplansPerRun = MAX_REPLANS
         plan = PlanState(goal="t")
         plan.replan_count = MAX_REPLANS
         # 预置检测器：进入主循环第一次 check 即触发 tool_failure
@@ -217,6 +218,46 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         for call in stream.await_args_list:
             contents = [message.get("content") for message in call.args[1] if isinstance(message.get("content"), str)]
             self.assertEqual(sum("已达最大重规划次数" in content for content in contents), 1)
+
+    async def test_max_steps_continuation_renews_run_budget(self):
+        """max_steps 是 Run 级额度：同 Session「继续」后重新获得步数额度，且不丢失上下文。"""
+        self.config.budget.maxStepsPerTask = 3
+        manager = _MemorySessionManager(None)
+        tool = AsyncMock(return_value={"success": True, "output": "ok"})
+        # 每个响应都调用业务工具，使循环持续消耗步数（不完成、不挂起输入）
+        responses = [_response("", [_call("skill_list", {}, f"s{i}")]) for i in range(6)]
+        stream = AsyncMock(side_effect=responses)
+        with (
+            patch.object(handoff_engine, "get_config", return_value=self.config),
+            patch.object(handoff_engine, "SessionManager", return_value=manager),
+            patch.object(handoff_engine, "resolve_session_db_path", return_value=":memory:"),
+            patch.object(handoff_engine, "stream_agent_response", stream),
+            patch.object(handoff_engine, "execute_tool", tool),
+            patch.object(handoff_engine.event_bus, "emit", Mock()),
+            patch.object(handoff_engine.mcp_client, "is_connected", return_value=False),
+        ):
+            result1 = await handoff_engine.run_engine("task", "s-cont")
+            calls_after_first = stream.await_count
+            # 模拟 server 层续聊：把「继续」追加进 engine messages 后再启动第二个 Run
+            saved = manager.load_state("s-cont")
+            msgs = list(saved.get("messages") or [])
+            msgs.append({"role": "user", "content": "继续"})
+            saved["messages"] = msgs
+            manager.save_state("s-cont", saved)
+            result2 = await handoff_engine.run_engine("继续", "s-cont")
+            calls_after_second = stream.await_count
+
+        self.assertEqual(result1["reason"], "max_steps")
+        self.assertEqual(result1["total_steps"], 3)
+        self.assertEqual(result2["reason"], "max_steps")
+        self.assertEqual(result2["total_steps"], 6)
+        # 第二次确实重新调用 LLM，而非立刻 max_steps 退出
+        self.assertGreater(calls_after_second, calls_after_first)
+        persisted = manager.load_state("s-cont")
+        self.assertEqual(persisted["stepCount"], 6)
+        user_contents = [m.get("content") for m in persisted["messages"] if m.get("role") == "user"]
+        self.assertTrue(any(isinstance(c, str) and "task" in c for c in user_contents))
+        self.assertTrue(any(isinstance(c, str) and "继续" in c for c in user_contents))
 
 
 class InputResolverTests(unittest.IsolatedAsyncioTestCase):

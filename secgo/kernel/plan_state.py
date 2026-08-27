@@ -90,7 +90,7 @@ REPLAN_TRIGGER_TOOL_CONSECUTIVE_FAILURES = 2   # 连续失败 N 次触发重规�
 REPLAN_TRIGGER_SAME_TOOL_REPEAT = 3            # 同一工具重复调用 N 次触发
 REPLAN_TRIGGER_NO_PROGRESS_STEPS = 15          # 连续 N 步无有效发现触发
 REPLAN_TRIGGER_MAX_FAILURES = 5                # 累计失败 N 次触发
-MAX_REPLANS = 3                                # 单个任务最多重规划次数（超过后进入收尾 fallback）
+MAX_REPLANS = 3  # 兜底默认值；运行时以 config.budget.maxReplansPerRun（settings.json run_limits.max_replans / MAX_REPLANS env）为准
 
 
 class ReplanDetector:
