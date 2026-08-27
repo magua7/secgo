@@ -26,7 +26,6 @@ import hmac
 import json
 import os
 import secrets
-import tempfile
 import threading
 import time
 import uuid
@@ -39,8 +38,9 @@ from fastapi import Body, Cookie, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from ..config.config import DEFAULT_AGENT_THINKING, SETTINGS_FILE, SubscriptionConfig, get_config, reset_config
-from ..config.jsonc import parse_jsonc, stringify_jsonc
+from ..config.config import DEFAULT_AGENT_THINKING, SETTINGS_FILE, get_config, reset_config
+from ..config.jsonc import parse_jsonc
+from ..config.persistence import write_settings_atomically
 from ..kernel.handoff_engine import (
     cancel_waiting_input,
     is_engine_awaiting_input,
@@ -52,26 +52,23 @@ from ..runtime.attachments import (
     MAX_ATTACHMENTS_PER_TASK,
     MAX_TASK_ATTACHMENT_BYTES,
     cleanup_expired_temporary_attachments,
-    extract_limited_text,
-    get_attachment_analysis,
-    get_session_attachment_path,
     get_temporary_attachment,
     move_attachment_to_session,
-    save_attachment_analysis,
     save_temporary_attachment,
 )
+from ..runtime.attachment_context import attachment_presentation, build_attachment_context
 from ..runtime.eventbus import event_bus
-from ..runtime.vision import (
-    ANALYSIS_VERSION,
-    VISION_CONCURRENCY,
-    VisionTarget,
-    analyze_attachment_image,
-    resolve_vision_target,
-    test_vision_capability,
-    vision_effective_status,
-)
+from ..runtime.vision import resolve_vision_target
 from ..runtime.session import SessionManager, resolve_session_db_path
 from ..runtime import turn_manager
+from .vision_config import (
+    VisionConfigRequest,
+    VisionTestRequest,
+    build_subscription_options,
+    build_vision_status,
+    run_vision_test,
+    save_vision_config,
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 RING_BUFFER_SIZE = 2000
@@ -487,14 +484,6 @@ def _clean_provider(provider: str) -> str:
     return (provider or "openai").strip() or "openai"
 
 
-# Vision 自定义模式内部使用的专用订阅名（保留 ID，前缀 __ 避免与用户订阅冲突）：
-# 不暴露给用户，也不出现在「复用已有订阅」下拉里。
-_VISION_SUBSCRIPTION_NAME = "__vision_custom__"
-
-# 保存配置后强制回到「待验证」：verified 只能由后端 /api/vision-test 真实测试成功后写入，
-# 客户端不能通过提交 test_status 等字段自行声明已验证。
-_VISION_TEST_RESET = {"tested_identity": "", "test_status": "pending", "test_message": "", "tested_at": None}
-
 MODEL_AGENT_IDS = ("planner", "research", "builder", "operator")
 MODEL_AGENT_LABELS = {
     "planner": "Planner",
@@ -691,33 +680,13 @@ def _save_model_config(default_cfg: Optional[Dict[str, Any]],
     updated["agents"] = agents
 
     try:
-        _write_settings_atomically(updated)
+        write_settings_atomically(updated, SETTINGS_FILE)
     except OSError as e:
         message = f"写入 settings.json 失败：{e}"
         return message, {"ok": False, "saved": False, "validation": validation, "error": message}
 
     reset_config()  # 下次 get_config() 重新加载，新配置立即生效
     return None, {"ok": True, "saved": True, "next": "/", "validation": validation}
-
-
-def _write_settings_atomically(updated: Dict[str, Any]) -> None:
-    """Flush a same-directory temporary file before replacing the live settings file."""
-    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{SETTINGS_FILE.name}.",
-        suffix=".tmp",
-        dir=SETTINGS_FILE.parent,
-    )
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as temp_file:
-            temp_file.write(stringify_jsonc(updated))
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_path, SETTINGS_FILE)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
 
 
 @app.post("/api/setup-keys")
@@ -811,46 +780,10 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
     planner_status = agent_status["planner"]
     enabled_planner = planner_status if planner_status and planner_status["enabled"] else None
 
-    # 可选图片视觉（Vision）预处理模型状态（复用 subscriptions 体系，非新 Agent）
-    # getattr 防御：部分测试用 SimpleNamespace mock config，可能没有 vision 字段。
-    vision_cfg = getattr(cfg.llm, "vision", None)
+    # 可选图片视觉（Vision）预处理模型状态与已有订阅列表（由 vision_config 组装）
     vision_target = resolve_vision_target()
-    mode = (getattr(vision_cfg, "mode", "reuse") or "reuse") if vision_cfg is not None else "reuse"
-    sub_name = (getattr(vision_cfg, "subscription", "") or "") if vision_cfg is not None else ""
-    model_id = (getattr(vision_cfg, "modelId", "") or "") if vision_cfg is not None else ""
-    vision_sub = cfg.llm.subscriptions.get(sub_name) if sub_name else None
-    provider = vision_target.provider if vision_target else (vision_sub.provider if vision_sub else "openai")
-    base_url = vision_target.base_url if vision_target else (vision_sub.baseURL if vision_sub else "")
-    has_api_key = bool(vision_target.api_key if vision_target else (vision_sub.apiKey if vision_sub else None))
-
-    vision_status = {
-        "enabled": bool(getattr(vision_cfg, "enabled", False)),
-        "mode": mode,
-        "configured": vision_target is not None,
-        # reuse 模式展示所选的订阅名；custom 模式不暴露内部 "vision" 订阅名
-        "subscription": sub_name if mode == "reuse" else "",
-        "model_id": model_id,
-        "provider": provider,
-        "base_url": base_url,
-        "has_api_key": has_api_key,
-        # 能力状态：unconfigured | pending | verified | failed（对应 provider::baseURL::modelId 身份）
-        "status": vision_effective_status(vision_cfg, vision_target),
-        "test_message": getattr(vision_cfg, "test_message", "") or "",
-        "tested_at": getattr(vision_cfg, "tested_at", None),
-    }
-
-    # 已有订阅列表（供 Vision 设置页下拉选择；不含 API Key，且隐藏内部 "vision" 专用订阅）
-    subscriptions_list = [
-        {
-            "name": name,
-            "provider": sub.provider,
-            "model": sub.modelId or "",
-            "base_url": sub.baseURL or "",
-            "has_key": bool(sub.apiKey),
-        }
-        for name, sub in cfg.llm.subscriptions.items()
-        if name != _VISION_SUBSCRIPTION_NAME
-    ]
+    vision_status = build_vision_status(cfg, vision_target)
+    subscriptions_list = build_subscription_options(cfg)
 
     return JSONResponse({
         "auth_enabled": _auth_enabled(),
@@ -866,210 +799,18 @@ async def api_keys_status(_auth=Depends(require_logged_in)) -> JSONResponse:
     })
 
 
-class _VisionConfigReq(BaseModel):
-    # 只保存配置本身；不接受任何客户端声明的验证状态（verified/failed 只能由后端测试写入）。
-    enabled: bool = True
-    mode: str = "reuse"      # reuse | custom
-    subscription: str = ""
-    modelId: str = ""
-    provider: str = "openai"
-    baseURL: str = ""
-    apiKey: str = ""
-
-
-class _VisionTestReq(BaseModel):
-    mode: str = "reuse"      # reuse | custom
-    subscription: str = ""
-    modelId: str = ""
-    provider: str = "openai"
-    baseURL: str = ""
-    apiKey: str = ""
-
-
-def _persist_vision_settings(existing: Dict[str, Any], updates: Dict[str, Any]) -> Optional[str]:
-    """合并 vision 更新到 settings.json 顶层 vision 节并落盘，返回错误消息（成功为 None）。"""
-    vision_raw = dict(existing.get("vision") or {})
-    vision_raw.update(updates)
-    updated = dict(existing)
-    updated["vision"] = vision_raw
-    try:
-        _write_settings_atomically(updated)
-    except OSError as exc:
-        return f"写入失败：{exc}"
-    reset_config()
-    return None
-
-
-def _write_subscriptions_and_vision(
-    existing: Dict[str, Any], subs_update: Dict[str, Any], vision_update: Dict[str, Any]
-) -> Optional[str]:
-    """同时更新 subscriptions 与 vision 节并落盘（自定义模式需写入专用订阅）。"""
-    subs = dict(existing.get("subscriptions") or {})
-    subs.update(subs_update)
-    vision_raw = dict(existing.get("vision") or {})
-    vision_raw.update(vision_update)
-    updated = dict(existing)
-    updated["subscriptions"] = subs
-    updated["vision"] = vision_raw
-    try:
-        _write_settings_atomically(updated)
-    except OSError as exc:
-        return f"写入失败：{exc}"
-    reset_config()
-    return None
-
-
-def _build_temp_vision_target(req: _VisionTestReq) -> tuple[Optional[VisionTarget], Optional[str]]:
-    """从测试请求构造一个临时 VisionTarget（仅用于本次测试，不落盘）。
-
-    复用模式：subscription + modelId，Key 取自该订阅；自定义模式：provider + baseURL + modelId + apiKey，
-    apiKey 留空时回落到已保存的自定义 Vision Key。
-    """
-    cfg = get_config()
-    model_id = (req.modelId or "").strip()
-    if not model_id:
-        return None, "请填写视觉模型（Model ID）"
-
-    if (req.mode or "reuse") == "reuse":
-        sub_name = (req.subscription or "").strip()
-        if not sub_name:
-            return None, "请选择模型订阅"
-        sub = cfg.llm.subscriptions.get(sub_name)
-        if sub is None or not getattr(sub, "baseURL", None) or not getattr(sub, "apiKey", None):
-            return None, f"订阅 {sub_name} 不存在或未配置完整"
-        return VisionTarget(
-            subscription_name=sub_name, subscription=sub, model_id=model_id, mode="reuse",
-            provider=getattr(sub, "provider", "openai") or "openai",
-            base_url=getattr(sub, "baseURL", "") or "", api_key=getattr(sub, "apiKey", "") or "",
-        ), None
-
-    # 自定义模式
-    provider = (req.provider or "openai").strip() or "openai"
-    base_url = (req.baseURL or "").strip()
-    if not base_url:
-        return None, "请填写 Base URL"
-    api_key = (req.apiKey or "").strip()
-    if not api_key:
-        saved_custom = cfg.llm.subscriptions.get(_VISION_SUBSCRIPTION_NAME)
-        api_key = getattr(saved_custom, "apiKey", "") if saved_custom else ""
-    if not api_key:
-        return None, "请填写 API Key"
-    sub = SubscriptionConfig(provider=provider, baseURL=base_url, modelId=model_id, apiKey=api_key)
-    return VisionTarget(
-        subscription_name=_VISION_SUBSCRIPTION_NAME, subscription=sub, model_id=model_id, mode="custom",
-        provider=provider, base_url=base_url, api_key=api_key,
-    ), None
-
-
 @app.post("/api/vision-config")
-async def api_vision_config(req: _VisionConfigReq,
+async def api_vision_config(req: VisionConfigRequest,
                             _auth=Depends(require_logged_in)) -> JSONResponse:
-    """保存图片视觉（Vision）配置。
-
-    - mode=reuse：复用已有订阅，仅记 enabled + subscription + modelId；
-    - mode=custom：在 subscriptions 中创建/更新一条专用订阅（provider/baseURL/apiKey/modelId），
-      vision 节只记 mode/subscription/modelId；apiKey 留空表示沿用已保存 Key。
-    保存不做能力检测；能力检测由 /api/vision-test 独立触发。
-    """
-    mode = (req.mode or "reuse").strip()
-    model_id = (req.modelId or "").strip()
-
-    try:
-        existing = parse_jsonc(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
-    except OSError:
-        existing = {}
-
-    if not req.enabled:
-        err = _persist_vision_settings(existing, {
-            "enabled": False, "mode": mode,
-            "subscription": (req.subscription or "").strip(), "modelId": model_id,
-            **_VISION_TEST_RESET,
-        })
-        if err:
-            return JSONResponse({"ok": False, "saved": False, "error": err}, status_code=500)
-        return JSONResponse({"ok": True, "saved": True})
-
-    if not model_id:
-        return JSONResponse({"ok": False, "saved": False, "error": "请填写视觉模型（Model ID）"}, status_code=400)
-
-    # 任何配置保存（含首次、修改、切换模式）都回到「待验证」。
-    vision_update: Dict[str, Any] = {"enabled": True, "mode": mode, "modelId": model_id, **_VISION_TEST_RESET}
-
-    if mode == "custom":
-        provider = (req.provider or "openai").strip() or "openai"
-        base_url = (req.baseURL or "").strip()
-        if not base_url:
-            return JSONResponse({"ok": False, "saved": False, "error": "请填写 Base URL"}, status_code=400)
-        api_key = (req.apiKey or "").strip()
-        saved_custom = (existing.get("subscriptions") or {}).get(_VISION_SUBSCRIPTION_NAME) or {}
-        effective_key = api_key or str(saved_custom.get("apiKey") or "")
-        if not effective_key:
-            return JSONResponse({"ok": False, "saved": False, "error": "请填写 API Key"}, status_code=400)
-        subs_update = {_VISION_SUBSCRIPTION_NAME: {
-            "provider": provider, "baseURL": base_url, "modelId": model_id, "apiKey": effective_key,
-        }}
-        vision_update["subscription"] = _VISION_SUBSCRIPTION_NAME
-        err = _write_subscriptions_and_vision(existing, subs_update, vision_update)
-    else:
-        sub_name = (req.subscription or "").strip()
-        if not sub_name:
-            return JSONResponse({"ok": False, "saved": False, "error": "请选择模型订阅"}, status_code=400)
-        cfg = get_config()
-        sub = cfg.llm.subscriptions.get(sub_name)
-        if sub is None or not getattr(sub, "baseURL", None) or not getattr(sub, "apiKey", None):
-            return JSONResponse(
-                {"ok": False, "saved": False, "error": f"订阅 {sub_name} 不存在或未配置完整"},
-                status_code=400,
-            )
-        vision_update["subscription"] = sub_name
-        err = _persist_vision_settings(existing, vision_update)
-
-    if err:
-        return JSONResponse({"ok": False, "saved": False, "error": err}, status_code=500)
-    return JSONResponse({"ok": True, "saved": True})
+    """保存 Vision 配置（业务逻辑在 vision_config.save_vision_config）。"""
+    return save_vision_config(req)
 
 
 @app.post("/api/vision-test")
-async def api_vision_test(req: Optional[_VisionTestReq] = Body(None),
+async def api_vision_test(req: Optional[VisionTestRequest] = Body(None),
                           _auth=Depends(require_logged_in)) -> JSONResponse:
-    """用内置测试图做一次视觉能力检测。
-
-    - 有 body：测试表单当前值（临时），不落盘、不写 cache、不泄漏 Key；
-    - 无 body：测试已保存配置，并持久化测试结果（verified/failed）。
-    """
-    if req is not None:
-        target, error = _build_temp_vision_target(req)
-        if error:
-            return JSONResponse({"ok": False, "status": "unconfigured", "error": error}, status_code=400)
-        result = await test_vision_capability(target)
-        return JSONResponse({"ok": True, "status": result["status"], "message": result.get("message", ""), "temporary": True})
-
-    cfg = get_config()
-    vision = getattr(cfg.llm, "vision", None)
-    if vision is None or not getattr(vision, "enabled", False):
-        return JSONResponse({"ok": False, "status": "unconfigured", "error": "Vision 未启用"}, status_code=400)
-    target = resolve_vision_target()
-    if target is None:
-        return JSONResponse(
-            {"ok": False, "status": "unconfigured",
-             "error": "Vision 已启用，但未配置有效的视觉模型"},
-            status_code=400,
-        )
-
-    result = await test_vision_capability(target)
-    try:
-        existing = parse_jsonc(SETTINGS_FILE.read_text(encoding="utf-8")) or {}
-    except OSError:
-        existing = {}
-    err = _persist_vision_settings(existing, {
-        "tested_identity": target.identity(),
-        "test_status": result["status"],
-        "test_message": result.get("message", ""),
-        "tested_at": int(time.time()),
-    })
-    if err:
-        return JSONResponse({"ok": False, "status": result["status"], "error": err}, status_code=500)
-    return JSONResponse({"ok": True, "status": result["status"], "message": result.get("message", "")})
+    """视觉能力检测（业务逻辑在 vision_config.run_vision_test）。"""
+    return await run_vision_test(req)
 
 
 @app.post("/api/attachments")
@@ -1102,157 +843,6 @@ async def api_upload_attachment(req: _AttachmentUploadReq,
             "sha256": metadata.sha256,
         },
     })
-
-
-def _attachment_presentation(metadata, analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """附件的展示形态（不含 SHA256/服务器路径等内部信息）。
-
-    image 附件会附带 analysis 字段，让前端展示「视觉分析完成 / 未启用 / 失败」等状态。
-    """
-    payload = {
-        "id": metadata.attachment_id,
-        "filename": metadata.original_name,
-        "mimeType": metadata.mime_type,
-        "kind": metadata.detected_kind,
-        "size": metadata.size,
-    }
-    if analysis is not None:
-        payload["analysis"] = {
-            "status": analysis.get("status"),
-            "summary": analysis.get("summary"),
-            "securityFindings": analysis.get("security_findings") or [],
-            "sceneTags": analysis.get("scene_tags") or [],
-            "confidence": analysis.get("confidence"),
-            "error": analysis.get("error"),
-        }
-    return payload
-
-
-def _cache_matches_vision_target(cached: Dict[str, Any], target) -> bool:
-    """判断 analysis.json 缓存是否对应当前 Vision Target（provider+baseURL+modelId+version 一致才复用）。"""
-    return (
-        cached.get("status") == "analyzed"
-        and cached.get("provider") == target.provider
-        and cached.get("base_url") == target.base_url
-        and cached.get("model") == target.model_id
-        and cached.get("analysis_version") == ANALYSIS_VERSION
-    )
-
-
-async def _analyze_image_attachment(session_id: str, metadata) -> Dict[str, Any]:
-    """对图片附件执行视觉分析（带缓存：仅当 Vision Target 未变化时复用 analysis.json）。"""
-    target = resolve_vision_target()
-    if target is not None:
-        cached = get_attachment_analysis(session_id, metadata.attachment_id)
-        if cached is not None and _cache_matches_vision_target(cached, target):
-            return cached
-    path = get_session_attachment_path(session_id, metadata.attachment_id)
-    result = await analyze_attachment_image(path, metadata.original_name, metadata.mime_type)
-    data = result.to_dict()
-    # 仅持久化「成功分析」；跳过/失败不落盘，下轮可重试（如用户后来补配了视觉模型）
-    if data.get("status") == "analyzed":
-        try:
-            save_attachment_analysis(session_id, metadata.attachment_id, data)
-        except (OSError, ValueError):
-            pass
-    return data
-
-
-def _image_analysis_lines(analysis: Dict[str, Any]) -> list:
-    """把图片视觉分析结果格式化为注入 Agent 上下文的行。"""
-    status = analysis.get("status")
-    if status == "analyzed":
-        lines = ["\n[图片视觉分析]"]
-        summary = analysis.get("summary") or ""
-        if summary:
-            lines.append(f"- 摘要: {summary}")
-        observed = analysis.get("observed_text") or []
-        if observed:
-            lines.append("- 画面文本: " + "；".join(str(t) for t in observed[:20]))
-        findings = analysis.get("security_findings") or []
-        if findings:
-            lines.append("- 安全发现:")
-            for finding in findings[:20]:
-                lines.append(f"    - {finding}")
-        tags = analysis.get("scene_tags") or []
-        if tags:
-            lines.append("- 场景标签: " + "、".join(str(t) for t in tags[:20]))
-        confidence = analysis.get("confidence") or "unknown"
-        lines.append(f"- 置信度: {confidence}")
-        if analysis.get("model"):
-            lines.append(f"- 分析模型: {analysis['model']}")
-        return lines
-    if status == "failed":
-        return [f"- 状态: 图片分析失败：{analysis.get('error') or '未知错误'}"]
-    return [f"- 状态: {analysis.get('summary') or '图片已上传，但未执行视觉分析。'}"]
-
-
-async def _build_attachment_context(session_id: str, attachments: list) -> tuple[str, Dict[str, Dict[str, Any]]]:
-    """构建注入 Agent 的用户附件上下文，并返回各图片附件的视觉分析结果。
-
-    - 多图用有上限的并发分析（Semaphore），避免线性逐个 await；
-    - 等待所有图片分析（或降级）完成后，才按附件顺序拼装上下文 → 保证 Planner 拿到完整上下文；
-    - 返回 (prompt_text, analyses)：analyses 映射 attachment_id -> 分析 dict。
-    """
-    # 先并发分析所有图片（有上限），失败隔离，不互相拖垮
-    image_metas = [m for m in attachments if m.detected_kind == "image"]
-    semaphore = asyncio.Semaphore(VISION_CONCURRENCY)
-
-    async def _analyze_one(metadata) -> Dict[str, Any]:
-        async with semaphore:
-            try:
-                return await _analyze_image_attachment(session_id, metadata)
-            except Exception as exc:  # 防御：任何意外都不中断其它图片
-                return {
-                    "status": "failed",
-                    "filename": metadata.original_name,
-                    "summary": f"图片分析失败：{exc}",
-                    "error": str(exc)[:200],
-                    "scene_tags": ["image"],
-                }
-
-    image_results = await asyncio.gather(*(_analyze_one(m) for m in image_metas))
-    image_map: Dict[str, Dict[str, Any]] = {
-        m.attachment_id: r for m, r in zip(image_metas, image_results)
-    }
-
-    sections = ["[用户附件]"]
-    analyses: Dict[str, Dict[str, Any]] = {}
-    for index, metadata in enumerate(attachments, 1):
-        lines = [
-            f"附件 {index}：",
-            f"- evidence_id: {metadata.attachment_id}",
-            f"- 文件名: {json.dumps(metadata.original_name, ensure_ascii=False)}",
-            f"- 类型: {metadata.detected_kind}",
-            f"- 大小: {metadata.size} bytes",
-            f"- SHA-256: {metadata.sha256}",
-        ]
-        if metadata.detected_kind in ("text", "pdf", "zip"):
-            extracted = extract_limited_text(
-                get_session_attachment_path(session_id, metadata.attachment_id),
-                detected_kind=metadata.detected_kind,
-            )
-            if extracted is not None:
-                lines.extend([
-                    f"\n[附件 {index} 提取内容开始]",
-                    extracted,
-                    f"[附件 {index} 提取内容结束]",
-                ])
-            else:
-                lines.append(f"- 状态: {metadata.detected_kind} 内容提取失败")
-        elif metadata.detected_kind == "image":
-            analysis = image_map.get(metadata.attachment_id) or {
-                "status": "failed",
-                "filename": metadata.original_name,
-                "summary": "图片分析失败",
-                "scene_tags": ["image"],
-            }
-            analyses[metadata.attachment_id] = analysis
-            lines.extend(_image_analysis_lines(analysis))
-        else:
-            lines.append("- 状态: 文件已安全保存，本阶段仅登记元数据")
-        sections.append("\n".join(lines))
-    return "\n\n".join(sections), analyses
 
 
 # ── 业务 API（全部 require_ready_state）────────────────────
@@ -1316,11 +906,11 @@ async def api_chat(request: Request, _auth=Depends(require_ready_state)) -> JSON
     attachment_analyses: Dict[str, Dict[str, Any]] = {}
     if moved_attachments:
         question = message or "请分析这些附件。"
-        prompt, attachment_analyses = await _build_attachment_context(session_id, moved_attachments)
+        prompt, attachment_analyses = await build_attachment_context(session_id, moved_attachments)
         engine_message = f"{prompt}\n\n用户问题：\n{question}"
         display_message = question
         display_attachments = [
-            _attachment_presentation(m, attachment_analyses.get(m.attachment_id))
+            attachment_presentation(m, attachment_analyses.get(m.attachment_id))
             for m in moved_attachments
         ]
     channel = _get_channel(session_id)

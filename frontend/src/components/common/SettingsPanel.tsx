@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from 'react'
-import { buildSetupPayload, getKeysStatus, handleApiError, logout, saveSetup, saveVisionConfig, testVisionConfig, validateSetupForSave } from '../../services/api'
-import type { AgentId, AgentOverrideInputs, ConfigId, KeysStatus, ModelConfigInput, ModelKeyStatus, SetupResponse, SubscriptionOption, VisionCapabilityStatus, VisionConfigInput, VisionMode, VisionTestRequest } from '../../types/api'
+import { buildSetupPayload, getKeysStatus, handleApiError, logout, saveSetup, validateSetupForSave } from '../../services/api'
+import type { AgentId, AgentOverrideInputs, ConfigId, KeysStatus, ModelConfigInput, ModelKeyStatus, SetupResponse } from '../../types/api'
 import { Icon } from './Icon'
 import { McpStatusPanel } from './McpStatusPanel'
+import { VisionSettings } from './VisionSettings'
 import type { Theme } from '../../hooks/preferences'
 
 const providerSuggestions = ['openai', 'deepseek', 'openrouter', 'anthropic', 'google', 'ollama', 'lm-studio', 'custom']
@@ -40,33 +41,11 @@ const fromStatus = (value: ModelKeyStatus): ModelConfigInput => ({
   api_key: '',
 })
 
-const VISION_STATUS_LABELS: Record<VisionCapabilityStatus, string> = {
-  unconfigured: '未配置',
-  pending: '待验证',
-  verified: '可用',
-  failed: '不可用',
-}
-
-// Vision 自定义模式的 Provider 选项（沿用项目已有类型：OpenAI Compatible / Anthropic）
-const VISION_PROVIDERS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: 'openai', label: 'OpenAI Compatible' },
-  { value: 'anthropic', label: 'Anthropic' },
-]
-
-const blankVision = (): VisionConfigInput => ({
-  enabled: false, mode: 'reuse', subscription: '', modelId: '', provider: 'openai', baseURL: '', apiKey: '',
-})
-
 export function SettingsPanel({ standalone = false, onClose, theme = 'light', onThemeToggle }: { standalone?: boolean; onClose?: () => void; theme?: Theme; onThemeToggle?: () => void }) {
   const [section, setSection] = useState<SettingsSection>('models')
   const [status, setStatus] = useState<KeysStatus | null>(null)
   const [defaultConfig, setDefaultConfig] = useState<ModelConfigInput>(blank())
   const [agentConfigs, setAgentConfigs] = useState<AgentOverrideInputs>(blankAgents())
-  const [visionConfig, setVisionConfig] = useState<VisionConfigInput>(blankVision())
-  const [subscriptions, setSubscriptions] = useState<SubscriptionOption[]>([])
-  const [visionTesting, setVisionTesting] = useState(false)
-  const [visionKeyVisible, setVisionKeyVisible] = useState(false)
-  const [visionTestResult, setVisionTestResult] = useState<{ status: 'verified' | 'failed'; message: string } | null>(null)
   const [validation, setValidation] = useState<ValidationStates>(idleValidation())
   const [validateKeys, setValidateKeys] = useState(true)
   const [message, setMessage] = useState('')
@@ -75,18 +54,6 @@ export function SettingsPanel({ standalone = false, onClose, theme = 'light', on
   const loadStatus = (data: KeysStatus) => {
     setStatus(data)
     if (data.default) setDefaultConfig(fromStatus(data.default))
-    setSubscriptions(data.subscriptions ?? [])
-    setVisionConfig(data.vision
-      ? {
-          enabled: data.vision.enabled,
-          mode: data.vision.mode,
-          subscription: data.vision.subscription,
-          modelId: data.vision.model_id,
-          provider: data.vision.provider || 'openai',
-          baseURL: data.vision.base_url,
-          apiKey: '',
-        }
-      : blankVision())
     setAgentConfigs((current) => {
       const next = { ...current }
       for (const { id } of AGENTS) {
@@ -187,112 +154,6 @@ export function SettingsPanel({ standalone = false, onClose, theme = 'light', on
     setAgentConfigs((values) => ({ ...values, [agentId]: { ...values[agentId], config } }))
   }
 
-  const updateVisionConfig = (patch: Partial<VisionConfigInput>) => {
-    setVisionConfig((value) => ({ ...value, ...patch }))
-    setVisionTestResult(null)
-  }
-
-  const validateVisionForm = (): string | null => {
-    if (!visionConfig.enabled) return null
-    if (visionConfig.mode === 'reuse') {
-      if (!visionConfig.subscription.trim() || !visionConfig.modelId.trim()) return '请选择模型订阅并填写视觉模型'
-      return null
-    }
-    if (!visionConfig.baseURL.trim() || !visionConfig.modelId.trim()) return '请填写 Base URL 与视觉模型'
-    if (!visionConfig.apiKey?.trim() && !status?.vision?.has_api_key) return '请填写 API Key'
-    return null
-  }
-
-  const savedVision = status?.vision
-  const visionDirty = Boolean(savedVision && (
-    visionConfig.enabled !== savedVision.enabled
-    || visionConfig.mode !== savedVision.mode
-    || visionConfig.subscription !== savedVision.subscription
-    || visionConfig.modelId !== savedVision.model_id
-    || visionConfig.provider !== savedVision.provider
-    || visionConfig.baseURL !== savedVision.base_url
-  ))
-  const visionStatus: VisionCapabilityStatus = status?.vision?.status ?? 'unconfigured'
-  const visionTestMessage = status?.vision?.test_message ?? ''
-  const visionBadgeText = (visionTestResult?.status === 'verified' && visionDirty)
-    ? '测试通过 · 尚未保存'
-    : VISION_STATUS_LABELS[visionStatus]
-  const visionBadgeClass = (visionTestResult?.status === 'verified' && visionDirty) ? 'pending' : visionStatus
-
-  const saveVision = async () => {
-    setMessage('')
-    const validationError = validateVisionForm()
-    if (validationError) {
-      setMessage(validationError)
-      return
-    }
-    // 注意：保存只提交配置本身，不携带任何客户端测试结果；verified 只能由后端真实测试写入。
-    const payload: VisionConfigInput = { ...visionConfig, apiKey: visionConfig.apiKey ?? '' }
-    try {
-      const result = await saveVisionConfig(payload)
-      if (!result.saved) {
-        setMessage(result.error || '视觉模型配置未保存')
-        return
-      }
-      setVisionTestResult(null)
-      try {
-        const freshStatus = await getKeysStatus()
-        loadStatus(freshStatus)
-        setMessage('视觉模型配置已保存')
-      } catch {
-        setMessage('视觉模型配置已保存，但状态刷新失败')
-      }
-    } catch (error) {
-      setMessage(handleApiError(error))
-    }
-  }
-
-  const testVision = async () => {
-    setMessage('')
-    setVisionTesting(true)
-    try {
-      if (visionDirty) {
-        // 测试表单当前值（临时，不落盘）
-        const validationError = validateVisionForm()
-        if (validationError) {
-          setMessage(validationError)
-          return
-        }
-        const payload: VisionTestRequest = {
-          mode: visionConfig.mode,
-          subscription: visionConfig.subscription,
-          modelId: visionConfig.modelId,
-          provider: visionConfig.provider,
-          baseURL: visionConfig.baseURL,
-          apiKey: visionConfig.apiKey ?? '',
-        }
-        const result = await testVisionConfig(payload)
-        if (result.status === 'verified' || result.status === 'failed') {
-          setVisionTestResult({ status: result.status, message: result.message ?? '' })
-        }
-        setMessage(result.status === 'verified'
-          ? '视觉能力测试通过 · 尚未保存'
-          : `视觉能力验证失败${result.message ? `：${result.message}` : ''}`)
-      } else {
-        // 测试已保存配置（后端持久化结果）
-        const result = await testVisionConfig()
-        try {
-          const freshStatus = await getKeysStatus()
-          loadStatus(freshStatus)
-        } catch { /* 状态刷新失败不覆盖测试结果 */ }
-        setMessage(result.status === 'verified'
-          ? '视觉能力验证通过'
-          : `视觉能力验证失败${result.message ? `：${result.message}` : ''}`)
-      }
-    } catch (error) {
-      setMessage(handleApiError(error))
-    } finally {
-      setVisionTesting(false)
-    }
-  }
-
-  const scrollToModelsTop = () => document.querySelector('.model-settings-section h2')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-
   return <div className={standalone ? 'settings-standalone page-texture' : 'settings-overlay'}>
     <section className="settings-panel" aria-label="设置">
       <header><div><span className="eyebrow">SEC-GO SETTINGS</span><h1>设置</h1></div>{onClose && <button className="icon-button" onClick={onClose} aria-label="关闭设置"><Icon name="close" /></button>}</header>
@@ -315,56 +176,7 @@ export function SettingsPanel({ standalone = false, onClose, theme = 'light', on
               </article>
             })}</div>
           </div>
-          <div className="agent-model-section vision-section">
-            <div className="switch-row"><span className="agent-identity"><strong>图片视觉分析</strong><small>使用视觉模型理解截图、页面和图像中的安全线索。</small></span><button type="button" role="switch" aria-label="启用图片视觉分析" aria-checked={visionConfig.enabled} className={`toggle-control ${visionConfig.enabled ? 'enabled' : ''}`} onClick={() => updateVisionConfig({ enabled: !visionConfig.enabled })}><span className="toggle-thumb" /></button></div>
-            {visionConfig.enabled && <div className="vision-config">
-              <div className="vision-status-row"><span>视觉模型</span><span className={`vision-status ${visionBadgeClass}`}>● {visionBadgeText}</span></div>
-
-              <div className="vision-mode-toggle" role="radiogroup" aria-label="配置方式">
-                <button type="button" role="radio" aria-checked={visionConfig.mode === 'reuse'} className={`vision-mode-option ${visionConfig.mode === 'reuse' ? 'active' : ''}`} onClick={() => updateVisionConfig({ mode: 'reuse' })}>复用已有订阅</button>
-                <button type="button" role="radio" aria-checked={visionConfig.mode === 'custom'} className={`vision-mode-option ${visionConfig.mode === 'custom' ? 'active' : ''}`} onClick={() => updateVisionConfig({ mode: 'custom' })}>自定义模型</button>
-              </div>
-
-              {visionConfig.mode === 'reuse' && <>
-                <label>模型订阅
-                  {subscriptions.length > 0
-                    ? <select aria-label="模型订阅" value={visionConfig.subscription} onChange={(event) => updateVisionConfig({ subscription: event.target.value })}><option value="">选择订阅…</option>{subscriptions.map((sub) => <option key={sub.name} value={sub.name}>{sub.name} · {sub.provider} · {sub.model}</option>)}</select>
-                    : <div className="vision-empty"><p>暂无已配置的模型订阅，请先在「默认模型」或「Agent 专用模型」中添加。</p><button type="button" className="text-button" onClick={scrollToModelsTop}>添加模型订阅</button></div>}
-                  <small className="field-hint">选择已配置的模型服务。</small>
-                </label>
-                <label>视觉模型
-                  <input value={visionConfig.modelId} onChange={(event) => updateVisionConfig({ modelId: event.target.value })} placeholder="如 qwen-vl-max" />
-                  <small className="field-hint">指定用于图片理解的模型（必填）。</small>
-                </label>
-              </>}
-
-              {visionConfig.mode === 'custom' && <>
-                <label>Provider
-                  <select aria-label="Vision Provider" value={visionConfig.provider} onChange={(event) => updateVisionConfig({ provider: event.target.value })}>{VISION_PROVIDERS.map((provider) => <option key={provider.value} value={provider.value}>{provider.label}</option>)}</select>
-                </label>
-                <label>Base URL
-                  <input aria-label="Vision Base URL" value={visionConfig.baseURL} onChange={(event) => updateVisionConfig({ baseURL: event.target.value })} placeholder="https://api.example.com/v1" />
-                </label>
-                <label>Model ID
-                  <input aria-label="Vision Model ID" value={visionConfig.modelId} onChange={(event) => updateVisionConfig({ modelId: event.target.value })} placeholder="如 qwen-vl-max / gpt-4o" />
-                </label>
-                <label>API Key
-                  <span className="vision-key-row">
-                    <input aria-label="Vision API Key" type={visionKeyVisible ? 'text' : 'password'} value={visionConfig.apiKey ?? ''} onChange={(event) => updateVisionConfig({ apiKey: event.target.value })} placeholder={status?.vision?.has_api_key ? '留空则保留当前已配置密钥' : '输入 API Key'} />
-                    <button type="button" className="icon-button" aria-label={visionKeyVisible ? '隐藏 API Key' : '显示 API Key'} onClick={() => setVisionKeyVisible((value) => !value)}><Icon name={visionKeyVisible ? 'eyeOff' : 'eye'} /></button>
-                  </span>
-                  <small className="field-hint">{status?.vision?.has_api_key ? '已配置密钥；留空表示沿用当前密钥。' : '首次配置需填写 API Key。'}</small>
-                </label>
-              </>}
-
-              {visionStatus === 'failed' && visionTestMessage && <p className="vision-test-error">上次检测失败：{visionTestMessage}</p>}
-              <div className="vision-actions">
-                <button type="button" className="secondary-button" disabled={visionTesting} onClick={() => void testVision()}>{visionTesting ? '正在测试…' : '测试视觉能力'}</button>
-                <button type="button" className="primary-button" onClick={() => void saveVision()}>保存配置</button>
-              </div>
-              <p className="field-hint">Vision 使用所选订阅或自定义服务的连接信息与 API Key。</p>
-            </div>}
-          </div>
+          <VisionSettings status={status} onMessage={setMessage} />
         </section>}
         {section === 'appearance' && <section className="settings-section"><h2>外观</h2><div className="appearance-row"><span>主题</span><button type="button" onClick={onThemeToggle}>{theme === 'light' ? '浅色' : '深色'} · 点击切换</button></div></section>}
         {section === 'tools' && <McpStatusPanel />}

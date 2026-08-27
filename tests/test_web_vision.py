@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from secgo.runtime import attachments
+from secgo.runtime import attachment_context, attachments
 from secgo.runtime.vision import ANALYSIS_VERSION, ImageAnalysis, VisionTarget
 from secgo.web import server
 
@@ -88,8 +88,8 @@ class WebVisionTests(unittest.TestCase):
             security_findings=["存在数据库错误信息泄露", "疑似 SQL 注入测试入口"],
             scene_tags=["web page", "login form"], confidence="high", model="fake-vision",
         )
-        with patch.object(server, "analyze_attachment_image", new=AsyncMock(return_value=fake)):
-            prompt, analyses = asyncio.run(server._build_attachment_context(session_id, [metadata]))
+        with patch.object(attachment_context, "analyze_attachment_image", new=AsyncMock(return_value=fake)):
+            prompt, analyses = asyncio.run(attachment_context.build_attachment_context(session_id, [metadata]))
 
         self.assertIn("[图片视觉分析]", prompt)
         self.assertIn("登录页面出现数据库错误回显", prompt)
@@ -113,8 +113,8 @@ class WebVisionTests(unittest.TestCase):
                 confidence="medium", model="fake-vision",
             )
 
-        with patch.object(server, "analyze_attachment_image", new=AsyncMock(side_effect=fake_result)):
-            prompt, analyses = asyncio.run(server._build_attachment_context(session_id, metas))
+        with patch.object(attachment_context, "analyze_attachment_image", new=AsyncMock(side_effect=fake_result)):
+            prompt, analyses = asyncio.run(attachment_context.build_attachment_context(session_id, metas))
 
         self.assertEqual(len(analyses), 3)
         self.assertIn("a.png 的视觉摘要", prompt)
@@ -133,8 +133,8 @@ class WebVisionTests(unittest.TestCase):
                 raise RuntimeError("provider timeout")
             return ImageAnalysis(status="analyzed", filename=filename, summary=f"{filename} 摘要", model="m")
 
-        with patch.object(server, "analyze_attachment_image", new=AsyncMock(side_effect=fake_result)):
-            prompt, analyses = asyncio.run(server._build_attachment_context(session_id, metas))
+        with patch.object(attachment_context, "analyze_attachment_image", new=AsyncMock(side_effect=fake_result)):
+            prompt, analyses = asyncio.run(attachment_context.build_attachment_context(session_id, metas))
 
         self.assertEqual(len(analyses), 3)
         self.assertIn("ok1.png 摘要", prompt)
@@ -151,8 +151,8 @@ class WebVisionTests(unittest.TestCase):
 
         skip = ImageAnalysis(status="skipped_no_vision", filename="shot.png",
                              summary="Vision 已启用，但未配置有效的视觉模型（需选择订阅并填写模型 ID）。")
-        with patch.object(server, "analyze_attachment_image", new=AsyncMock(return_value=skip)):
-            prompt, analyses = asyncio.run(server._build_attachment_context(session_id, [metadata]))
+        with patch.object(attachment_context, "analyze_attachment_image", new=AsyncMock(return_value=skip)):
+            prompt, analyses = asyncio.run(attachment_context.build_attachment_context(session_id, [metadata]))
 
         self.assertIn("未配置有效的视觉模型", prompt)
         self.assertEqual(analyses[attachment_id]["status"], "skipped_no_vision")
@@ -170,9 +170,9 @@ class WebVisionTests(unittest.TestCase):
 
         target = _vision_target("gpt-4o")
         analyze_mock = AsyncMock(return_value=ImageAnalysis(status="analyzed", filename="shot.png", summary="不应出现"))
-        with patch.object(server, "resolve_vision_target", return_value=target), \
-             patch.object(server, "analyze_attachment_image", new=analyze_mock):
-            data = asyncio.run(server._analyze_image_attachment(session_id, metadata))
+        with patch.object(attachment_context, "resolve_vision_target", return_value=target), \
+             patch.object(attachment_context, "analyze_attachment_image", new=analyze_mock):
+            data = asyncio.run(attachment_context.analyze_attachment_image_cached(session_id, metadata))
 
         self.assertEqual(data["summary"], "缓存的摘要")
         analyze_mock.assert_not_awaited()
@@ -191,9 +191,9 @@ class WebVisionTests(unittest.TestCase):
         target = _vision_target("qwen-vl-max")
         fresh = ImageAnalysis(status="analyzed", filename="shot.png", summary="qwen 的新摘要",
                               model="qwen-vl-max", subscription="vision", provider="openai", base_url="https://x")
-        with patch.object(server, "resolve_vision_target", return_value=target), \
-             patch.object(server, "analyze_attachment_image", new=AsyncMock(return_value=fresh)):
-            data = asyncio.run(server._analyze_image_attachment(session_id, metadata))
+        with patch.object(attachment_context, "resolve_vision_target", return_value=target), \
+             patch.object(attachment_context, "analyze_attachment_image", new=AsyncMock(return_value=fresh)):
+            data = asyncio.run(attachment_context.analyze_attachment_image_cached(session_id, metadata))
 
         self.assertEqual(data["summary"], "qwen 的新摘要")
         self.assertEqual(data["model"], "qwen-vl-max")
@@ -212,9 +212,9 @@ class WebVisionTests(unittest.TestCase):
         target = _vision_target("qwen-vl-max", base_url="https://b.example/v1")
         fresh = ImageAnalysis(status="analyzed", filename="shot.png", summary="endpoint B 的新摘要",
                               model="qwen-vl-max", subscription="vision", provider="openai", base_url="https://b.example/v1")
-        with patch.object(server, "resolve_vision_target", return_value=target), \
-             patch.object(server, "analyze_attachment_image", new=AsyncMock(return_value=fresh)):
-            data = asyncio.run(server._analyze_image_attachment(session_id, metadata))
+        with patch.object(attachment_context, "resolve_vision_target", return_value=target), \
+             patch.object(attachment_context, "analyze_attachment_image", new=AsyncMock(return_value=fresh)):
+            data = asyncio.run(attachment_context.analyze_attachment_image_cached(session_id, metadata))
 
         self.assertEqual(data["summary"], "endpoint B 的新摘要")
 

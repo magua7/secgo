@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from secgo.runtime.vision import STATUS_VERIFIED, VisionTarget
-from secgo.web import server
+from secgo.web import server, vision_config
 
 
 def _cfg(subscriptions=None, vision=None):
@@ -22,13 +22,13 @@ def _cfg(subscriptions=None, vision=None):
 
 
 class WebVisionConfigTests(unittest.TestCase):
-    def _call_config(self, settings: dict, req: server._VisionConfigReq):
+    def _call_config(self, settings: dict, req):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = Path(temp_dir) / "settings.json"
             settings_file.write_text(json.dumps(settings), encoding="utf-8")
             with (
-                patch.object(server, "SETTINGS_FILE", settings_file),
-                patch.object(server, "reset_config"),
+                patch.object(vision_config, "SETTINGS_FILE", settings_file),
+                patch.object(vision_config, "reset_config"),
             ):
                 response = asyncio.run(server.api_vision_config(req))
             saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8")) or {}
@@ -37,9 +37,9 @@ class WebVisionConfigTests(unittest.TestCase):
     # ── 信任边界：客户端不能声明 verified ──────────────────────
 
     def test_config_req_schema_does_not_accept_client_test_status(self):
-        self.assertNotIn("test_status", server._VisionConfigReq.model_fields)
-        self.assertNotIn("tested_identity", server._VisionConfigReq.model_fields)
-        self.assertNotIn("tested_at", server._VisionConfigReq.model_fields)
+        self.assertNotIn("test_status", vision_config.VisionConfigRequest.model_fields)
+        self.assertNotIn("tested_identity", vision_config.VisionConfigRequest.model_fields)
+        self.assertNotIn("tested_at", vision_config.VisionConfigRequest.model_fields)
 
     def test_save_resets_verification_to_pending(self):
         initial = {
@@ -52,7 +52,7 @@ class WebVisionConfigTests(unittest.TestCase):
                 "test_message": "", "tested_at": 123,
             },
         }
-        req = server._VisionConfigReq(
+        req = vision_config.VisionConfigRequest(
             enabled=True, mode="custom", provider="openai", baseURL="https://x/v1",
             modelId="qwen-vl-max", apiKey="k",
         )
@@ -72,11 +72,11 @@ class WebVisionConfigTests(unittest.TestCase):
             settings_file = Path(temp_dir) / "settings.json"
             settings_file.write_text(json.dumps({"subscriptions": {}, "vision": {}}), encoding="utf-8")
             with (
-                patch.object(server, "SETTINGS_FILE", settings_file),
-                patch.object(server, "reset_config"),
-                patch.object(server, "get_config", return_value=cfg),
-                patch.object(server, "resolve_vision_target", return_value=target),
-                patch.object(server, "test_vision_capability", new=AsyncMock(return_value={"status": STATUS_VERIFIED, "message": ""})),
+                patch.object(vision_config, "SETTINGS_FILE", settings_file),
+                patch.object(vision_config, "reset_config"),
+                patch.object(vision_config, "get_config", return_value=cfg),
+                patch.object(vision_config, "resolve_vision_target", return_value=target),
+                patch.object(vision_config, "test_vision_capability", new=AsyncMock(return_value={"status": STATUS_VERIFIED, "message": ""})),
             ):
                 response = asyncio.run(server.api_vision_test(None))
             saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8")) or {}
@@ -88,7 +88,7 @@ class WebVisionConfigTests(unittest.TestCase):
     # ── 内部保留订阅 ID ──────────────────────────────────────
 
     def test_custom_save_creates_reserved_subscription(self):
-        req = server._VisionConfigReq(
+        req = vision_config.VisionConfigRequest(
             enabled=True, mode="custom", provider="openai",
             baseURL="https://api.example.com/v1", modelId="qwen-vl-max", apiKey="secret-custom-key",
         )
@@ -109,7 +109,7 @@ class WebVisionConfigTests(unittest.TestCase):
                 "vision": {"provider": "openai", "baseURL": "https://user.example/v1", "modelId": "user-model", "apiKey": "user-key"},
             },
         }
-        req = server._VisionConfigReq(
+        req = vision_config.VisionConfigRequest(
             enabled=True, mode="custom", provider="openai",
             baseURL="https://api.example.com/v1", modelId="qwen-vl-max", apiKey="custom-key",
         )
@@ -122,7 +122,7 @@ class WebVisionConfigTests(unittest.TestCase):
         self.assertEqual(saved["subscriptions"]["__vision_custom__"]["apiKey"], "custom-key")
 
     def test_custom_save_missing_key_is_blocked(self):
-        req = server._VisionConfigReq(
+        req = vision_config.VisionConfigRequest(
             enabled=True, mode="custom", provider="openai",
             baseURL="https://api.example.com/v1", modelId="qwen-vl-max", apiKey="",
         )
@@ -137,7 +137,7 @@ class WebVisionConfigTests(unittest.TestCase):
                 "__vision_custom__": {"provider": "openai", "baseURL": "https://api.example.com/v1", "modelId": "old-model", "apiKey": "old-custom-key"},
             },
         }
-        req = server._VisionConfigReq(
+        req = vision_config.VisionConfigRequest(
             enabled=True, mode="custom", provider="openai",
             baseURL="https://api.example.com/v1", modelId="qwen-vl-max", apiKey="",
         )
@@ -148,14 +148,14 @@ class WebVisionConfigTests(unittest.TestCase):
 
     def test_reuse_mode_save(self):
         sub = SimpleNamespace(provider="openai", baseURL="https://coding.example/v1", modelId="deepseek-chat", apiKey="coding-key")
-        req = server._VisionConfigReq(enabled=True, mode="reuse", subscription="coding", modelId="qwen-vl-max")
+        req = vision_config.VisionConfigRequest(enabled=True, mode="reuse", subscription="coding", modelId="qwen-vl-max")
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = Path(temp_dir) / "settings.json"
             settings_file.write_text(json.dumps({"subscriptions": {}}), encoding="utf-8")
             with (
-                patch.object(server, "SETTINGS_FILE", settings_file),
-                patch.object(server, "reset_config"),
-                patch.object(server, "get_config", return_value=_cfg(subscriptions={"coding": sub})),
+                patch.object(vision_config, "SETTINGS_FILE", settings_file),
+                patch.object(vision_config, "reset_config"),
+                patch.object(vision_config, "get_config", return_value=_cfg(subscriptions={"coding": sub})),
             ):
                 response = asyncio.run(server.api_vision_config(req))
             saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8")) or {}
@@ -175,14 +175,14 @@ class WebVisionConfigTests(unittest.TestCase):
             },
         }
         sub = SimpleNamespace(provider="openai", baseURL="https://coding.example/v1", modelId="deepseek-chat", apiKey="coding-key")
-        req = server._VisionConfigReq(enabled=True, mode="reuse", subscription="coding", modelId="qwen-vl-max")
+        req = vision_config.VisionConfigRequest(enabled=True, mode="reuse", subscription="coding", modelId="qwen-vl-max")
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = Path(temp_dir) / "settings.json"
             settings_file.write_text(json.dumps(initial), encoding="utf-8")
             with (
-                patch.object(server, "SETTINGS_FILE", settings_file),
-                patch.object(server, "reset_config"),
-                patch.object(server, "get_config", return_value=_cfg(subscriptions={"coding": sub})),
+                patch.object(vision_config, "SETTINGS_FILE", settings_file),
+                patch.object(vision_config, "reset_config"),
+                patch.object(vision_config, "get_config", return_value=_cfg(subscriptions={"coding": sub})),
             ):
                 response = asyncio.run(server.api_vision_config(req))
             saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8")) or {}
@@ -193,7 +193,7 @@ class WebVisionConfigTests(unittest.TestCase):
 
     def test_temp_test_does_not_persist_key(self):
         initial = {"subscriptions": {}}
-        req = server._VisionTestReq(
+        req = vision_config.VisionTestRequest(
             mode="custom", provider="openai", baseURL="https://api.example.com/v1",
             modelId="qwen-vl-max", apiKey="temp-secret-123",
         )
@@ -201,9 +201,9 @@ class WebVisionConfigTests(unittest.TestCase):
             settings_file = Path(temp_dir) / "settings.json"
             settings_file.write_text(json.dumps(initial), encoding="utf-8")
             with (
-                patch.object(server, "SETTINGS_FILE", settings_file),
-                patch.object(server, "reset_config"),
-                patch.object(server, "test_vision_capability", new=AsyncMock(return_value={"status": STATUS_VERIFIED, "message": ""})),
+                patch.object(vision_config, "SETTINGS_FILE", settings_file),
+                patch.object(vision_config, "reset_config"),
+                patch.object(vision_config, "test_vision_capability", new=AsyncMock(return_value={"status": STATUS_VERIFIED, "message": ""})),
             ):
                 response = asyncio.run(server.api_vision_test(req))
             saved_text = settings_file.read_text(encoding="utf-8")
@@ -214,13 +214,13 @@ class WebVisionConfigTests(unittest.TestCase):
 
     def test_temp_test_blank_key_reuses_saved_custom_key(self):
         sub = SimpleNamespace(provider="openai", baseURL="https://v.example/v1", modelId="qwen-vl-max", apiKey="saved-vision-key")
-        req = server._VisionTestReq(
+        req = vision_config.VisionTestRequest(
             mode="custom", provider="openai", baseURL="https://v.example/v1",
             modelId="qwen-vl-max", apiKey="",
         )
         test_mock = AsyncMock(return_value={"status": STATUS_VERIFIED, "message": ""})
-        with patch.object(server, "get_config", return_value=_cfg(subscriptions={"__vision_custom__": sub})), \
-             patch.object(server, "test_vision_capability", new=test_mock):
+        with patch.object(vision_config, "get_config", return_value=_cfg(subscriptions={"__vision_custom__": sub})), \
+             patch.object(vision_config, "test_vision_capability", new=test_mock):
             response = asyncio.run(server.api_vision_test(req))
         body = json.loads(response.body)
         self.assertEqual(body["status"], STATUS_VERIFIED)
