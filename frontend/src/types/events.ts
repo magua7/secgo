@@ -15,6 +15,16 @@ export interface BudgetData extends BaseData { usage?: number; limit?: number }
 export interface DecisionData extends BaseData { decision?: Record<string, unknown>; step?: number }
 export interface EvidenceData extends BaseData { evidence?: EvidenceItem }
 export interface PersistenceWarningData extends BaseData { error?: string }
+export interface AttachmentAnalyzedData extends BaseData {
+  attachment_id?: string
+  filename?: string
+  status?: 'analyzed' | 'skipped_no_vision' | 'failed'
+  summary?: string
+  security_findings?: string[]
+  scene_tags?: string[]
+  confidence?: string
+  error?: string
+}
 
 export type ExecutionEvent =
   | { type: 'engine:start'; data: EngineStartData }
@@ -30,6 +40,7 @@ export type ExecutionEvent =
   | { type: 'engine:evidence'; data: EvidenceData }
   | { type: 'decision:reason'; data: DecisionData }
   | { type: 'persistence:warning'; data: PersistenceWarningData }
+  | { type: 'attachment:analyzed'; data: AttachmentAnalyzedData }
   | { type: 'engine:end'; data: EndData }
   | { type: 'ui:reset'; data: BaseData }
   | { type: 'ui:toggle-execution'; data: BaseData }
@@ -40,6 +51,7 @@ export const SSE_EVENT_NAMES = [
   'llm:stream', 'engine:text', 'engine:end', 'budget:exceeded', 'engine:error',
   'todo:updated', 'tool:stream-start', 'tool:stream-end', 'engine:awaiting_input',
   'engine:user_input', 'engine:evidence', 'persistence:warning', 'decision:reason',
+  'attachment:analyzed',
 ] as const
 
 export type SseEventName = typeof SSE_EVENT_NAMES[number]

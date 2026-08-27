@@ -197,3 +197,26 @@ describe('decision:reason event', () => {
     expect(next.timeline.some((t) => t.kind === 'finding')).toBe(true)
   })
 })
+
+describe('attachment:analyzed event', () => {
+  it('surfaces a successful vision analysis as a finding without forcing it into evidence', () => {
+    const state = executionReducer(initialExecutionState, { type: 'ui:reset', data: {} })
+    const next = executionReducer(state, { type: 'attachment:analyzed', data: { session_id: 's1', filename: 'login.png', status: 'analyzed', summary: '登录页数据库错误回显', security_findings: ['存在数据库错误信息泄露'] } })
+    expect(next.timeline.some((t) => t.kind === 'finding' && t.title.includes('login.png'))).toBe(true)
+    expect(next.keyFindings).toContain('存在数据库错误信息泄露')
+    expect(next.evidence).toHaveLength(0)
+  })
+
+  it('marks a failed vision analysis as an error timeline item and keeps running', () => {
+    const state = executionReducer(initialExecutionState, { type: 'ui:reset', data: {} })
+    const next = executionReducer(state, { type: 'attachment:analyzed', data: { session_id: 's1', filename: 'shot.png', status: 'failed', error: 'provider timeout' } })
+    expect(next.timeline.some((t) => t.kind === 'finding' && t.status === 'error')).toBe(true)
+    expect(next.status).toBe('idle')
+  })
+
+  it('marks a skipped vision analysis as a completed notice', () => {
+    const state = executionReducer(initialExecutionState, { type: 'ui:reset', data: {} })
+    const next = executionReducer(state, { type: 'attachment:analyzed', data: { session_id: 's1', filename: 'shot.png', status: 'skipped_no_vision', summary: '未配置视觉模型' } })
+    expect(next.timeline.some((t) => t.kind === 'finding' && t.title.includes('未启用'))).toBe(true)
+  })
+})

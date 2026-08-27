@@ -20,6 +20,7 @@ from .workspace import get_workspace_base
 UPLOADS_BASE = PROJECT_ROOT / "runtime" / "uploads"
 ORIGINAL_FILENAME = "original.bin"
 METADATA_FILENAME = "metadata.json"
+ANALYSIS_FILENAME = "analysis.json"
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENTS_PER_TASK = 8
 MAX_TASK_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -509,6 +510,36 @@ def get_session_attachment_path(session_id: str, attachment_id: str) -> Path:
         raise FileNotFoundError("Attachment not found")
     session_base = _safe_child(get_workspace_base().resolve(), session_id)
     return _safe_child(_attachment_dir(_safe_child(session_base, "attachments"), attachment_id), ORIGINAL_FILENAME)
+
+
+def save_attachment_analysis(session_id: str, attachment_id: str, analysis: Dict[str, Any]) -> None:
+    """把附件预处理结果（如图片视觉分析）持久化为 attachment 目录下的 analysis.json。
+
+    分析结果是派生的、可复用的：后续 Turn 重放时直接读取，避免重复调用视觉模型。
+    """
+    session_base = _safe_child(get_workspace_base().resolve(), session_id)
+    attachment_dir = _attachment_dir(_safe_child(session_base, "attachments"), attachment_id)
+    if not attachment_dir.is_dir():
+        raise FileNotFoundError("Attachment not found")
+    serialized = json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8")
+    _atomic_write(_safe_child(attachment_dir, ANALYSIS_FILENAME), serialized)
+
+
+def get_attachment_analysis(session_id: str, attachment_id: str) -> Optional[Dict[str, Any]]:
+    """读取已缓存的附件预处理结果；不存在或损坏时返回 None。"""
+    metadata = get_session_attachment(session_id, attachment_id)
+    if metadata is None:
+        return None
+    session_base = _safe_child(get_workspace_base().resolve(), session_id)
+    attachment_dir = _attachment_dir(_safe_child(session_base, "attachments"), attachment_id)
+    analysis_path = _safe_child(attachment_dir, ANALYSIS_FILENAME)
+    if not analysis_path.is_file():
+        return None
+    try:
+        data = json.loads(analysis_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
 
 
 def delete_temporary_attachment(attachment_id: str) -> None:

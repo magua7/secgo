@@ -1,5 +1,18 @@
 export type AttachmentStatus = 'pending' | 'uploading' | 'uploaded' | 'error'
 
+// 图片视觉分析状态：analyzed=已分析 / skipped_no_vision=未配置视觉模型 / failed=分析失败
+export type VisionAnalysisStatus = 'analyzed' | 'skipped_no_vision' | 'failed'
+
+// 图片附件的结构化视觉分析结果（不含 SHA256 / 服务器路径等内部信息）
+export interface AttachmentAnalysis {
+  status: VisionAnalysisStatus
+  summary?: string
+  securityFindings?: string[]
+  sceneTags?: string[]
+  confidence?: string
+  error?: string
+}
+
 // 用户消息里展示的结构化附件（不含 SHA256 / 服务器路径等内部信息）
 export interface MessageAttachment {
   id: string
@@ -7,6 +20,7 @@ export interface MessageAttachment {
   mimeType: string
   kind: string
   size: number
+  analysis?: AttachmentAnalysis
 }
 
 export interface PendingAttachment {

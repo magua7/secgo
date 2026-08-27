@@ -40,6 +40,30 @@ class AgentModelConfig:
 
 
 @dataclass(frozen=False)
+class VisionModelConfig:
+    """可选的图片视觉（Vision）附件预处理模型。
+
+    它不是新 Agent，而是附件预处理能力。支持两种配置方式：
+    - mode="reuse"：复用已有 subscription（subscription + modelId）；
+    - mode="custom"：自定义视觉模型，其 provider/baseURL/apiKey 存放在 subscriptions
+      里的一条专用 subscription（name=subscription，约定为 "vision"），此处只存
+      subscription + modelId。
+    两种方式的运行时连接身份统一为 provider + baseURL + modelId。
+    tested_identity 记录最近一次能力检测对应的连接身份（provider::baseURL::modelId），
+    当前身份变化后即视为「待验证」。
+    """
+    enabled: bool = True
+    mode: str = "reuse"  # reuse | custom
+    subscription: str = ""
+    modelId: str = ""
+    # 能力检测结果（对应 provider::baseURL::modelId 身份）
+    tested_identity: str = ""
+    test_status: str = "pending"  # pending | verified | failed
+    test_message: str = ""
+    tested_at: Optional[int] = None
+
+
+@dataclass(frozen=False)
 class McpServerConfig:
     command: str
     args: List[str] = field(default_factory=list)
@@ -57,6 +81,8 @@ class LlmConfig:
     subscriptions: Dict[str, SubscriptionConfig]
     agents: Dict[str, AgentModelConfig]
     enabled: bool = True
+    # 可选图片视觉预处理模型（复用 subscription 体系，非新 Agent）
+    vision: Optional[VisionModelConfig] = None
 
 
 @dataclass(frozen=False)
@@ -507,6 +533,36 @@ def load_config() -> AppConfig:
         int(run_limits.get("max_tokens_per_run") or DEFAULT_CONFIG.budget.maxTokensPerRun),
     )
 
+    # 可选图片视觉（Vision）预处理模型：settings.json 顶层 vision 节；环境变量可覆盖。
+    # 只指明「用哪个订阅 + 哪个 modelId」，不再隐式复用默认模型。
+    vision_cfg: Optional[VisionModelConfig] = None
+    vision_raw = settings.get("vision")
+    if isinstance(vision_raw, dict) and vision_raw:
+        vision_cfg = VisionModelConfig(
+            enabled=bool(vision_raw.get("enabled", True)),
+            mode=str(vision_raw.get("mode") or "reuse"),
+            subscription=str(vision_raw.get("subscription") or ""),
+            modelId=str(vision_raw.get("modelId") or ""),
+            tested_identity=str(vision_raw.get("tested_identity") or ""),
+            test_status=str(vision_raw.get("test_status") or "pending"),
+            test_message=str(vision_raw.get("test_message") or ""),
+            tested_at=vision_raw.get("tested_at"),
+        )
+    vision_model_env = _env_var("VISION_MODEL")
+    vision_sub_env = _env_var("VISION_SUBSCRIPTION")
+    if vision_model_env or vision_sub_env:
+        vision_cfg = VisionModelConfig(
+            enabled=vision_cfg.enabled if vision_cfg else True,
+            mode=vision_cfg.mode if vision_cfg else "reuse",
+            subscription=vision_sub_env or (vision_cfg.subscription if vision_cfg else ""),
+            modelId=vision_model_env or (vision_cfg.modelId if vision_cfg else ""),
+            # 环境变量改变了目标，旧的检测结果不再有效 → 待验证
+            tested_identity="",
+            test_status="pending",
+            test_message="",
+            tested_at=None,
+        )
+
     llm_cfg = LlmConfig(
         defaultModel=_env_var("DEFAULT_MODEL") or settings_default_model,
         temperature=_env_float("TEMPERATURE", DEFAULT_CONFIG.llm.temperature),
@@ -514,6 +570,7 @@ def load_config() -> AppConfig:
         subscriptions=subscriptions,
         agents=agents,
         enabled=settings.get("llm") and (settings.get("llm") or {}).get("enabled", True) is not False,
+        vision=vision_cfg,
     )
 
     # web 节：settings.json 中的 Web 登录凭据与端口（原 .env 数据迁移至此）

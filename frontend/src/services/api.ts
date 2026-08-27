@@ -1,4 +1,4 @@
-import type { AgentId, AgentOverrideInputs, ChatResponse, KeysStatus, LoginResponse, ModelConfigInput, SessionsResponse, SetupPayload, SetupResponse } from '../types/api'
+import type { AgentId, AgentOverrideInputs, ChatResponse, KeysStatus, LoginResponse, ModelConfigInput, SessionsResponse, SetupPayload, SetupResponse, VisionConfigInput, VisionConfigResponse, VisionTestRequest, VisionTestResponse } from '../types/api'
 import type { SessionConversationResponse } from '../types/session'
 
 export class ApiError extends Error {
@@ -114,6 +114,16 @@ export function buildSetupPayload(defaultConfig: ModelConfigInput, agentValues: 
 
 export const saveSetup = (payload: SetupPayload): Promise<SetupResponse> => apiRequest('/api/setup-keys', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+})
+
+export const saveVisionConfig = (payload: VisionConfigInput): Promise<VisionConfigResponse> => apiRequest('/api/vision-config', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+})
+
+export const testVisionConfig = (payload?: VisionTestRequest): Promise<VisionTestResponse> => apiRequest('/api/vision-test', {
+  method: 'POST',
+  headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+  body: payload ? JSON.stringify(payload) : undefined,
 })
 
 export const resolvePostLoginDestination = (_ready: boolean): '/' => '/'

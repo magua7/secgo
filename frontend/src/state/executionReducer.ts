@@ -199,6 +199,21 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
         timeline: [...state.timeline, line(state, { kind: 'finding', title: '◆ 策略调整', detail: `${record.trigger_detail} → ${record.reason}`.slice(0, 180), status: 'completed' })],
       }
     }
+    case 'attachment:analyzed': {
+      const filename = event.data.filename ?? '附件'
+      const status = event.data.status ?? 'failed'
+      if (status === 'analyzed') {
+        return {
+          ...state,
+          keyFindings: appendMany(state.keyFindings, event.data.security_findings ?? []),
+          timeline: [...state.timeline, line(state, { kind: 'finding', title: `◆ 图片视觉分析 · ${filename}`, detail: (event.data.summary ?? '').slice(0, 180), status: 'completed' })],
+        }
+      }
+      if (status === 'failed') {
+        return { ...state, timeline: [...state.timeline, line(state, { kind: 'finding', title: `图片视觉分析失败 · ${filename}`, detail: (event.data.error ?? event.data.summary ?? '').slice(0, 180), status: 'error' })] }
+      }
+      return { ...state, timeline: [...state.timeline, line(state, { kind: 'finding', title: `图片视觉未启用 · ${filename}`, detail: (event.data.summary ?? '').slice(0, 180), status: 'completed' })] }
+    }
     case 'persistence:warning':
       return state
     case 'engine:end': {
