@@ -31,7 +31,7 @@ class ReplanDetectorTests(unittest.TestCase):
         self.assertEqual(trigger["trigger"], "repeated_calls")
 
     def test_detects_no_progress(self):
-        self.detector.record_tool_call("nmap", True, 1)  # 最后一次成功在第 1 步
+        self.detector.record_progress(1)  # 最后一次有效进展（如新 Evidence）在第 1 步
         # 记录少量失败（total_failures < 5 避免 excessive_failures），不同工具避免 repeated_calls
         self.detector.record_tool_call("tool_a", False, 16)
         self.detector.record_tool_call("tool_b", False, 17)
@@ -40,6 +40,32 @@ class ReplanDetectorTests(unittest.TestCase):
         # total_failures=4 < 5, no repeated_calls, last_finding_step=1
         # step=20: steps_since_finding=19 >= 15 → no_progress 应触发
         trigger = self.detector.check(20, "operator")
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger["trigger"], "no_progress")
+
+    def test_successful_calls_without_findings_do_not_block_no_progress(self):
+        """工具成功 ≠ 有效进展：连续 pwd/ls/echo 式「成功但零发现」不得刷新 no_progress 基线。"""
+        self.detector.record_progress(1)  # 唯一一次真实进展
+        for step in range(2, 17):  # 连续 15 步成功但无任何新发现的调用
+            self.detector.record_tool_call("execute_bash", True, step)
+        # 成功调用不得把基线刷到第 16 步
+        self.assertEqual(self.detector._last_finding_step, 1)
+        trigger = self.detector.check(17, "operator")
+        self.assertIsNotNone(trigger)
+        self.assertEqual(trigger["trigger"], "no_progress")
+
+    def test_record_progress_refreshes_no_progress_window(self):
+        """Evidence / TODO 实质更新等结构化信号刷新 no_progress 计数。"""
+        self.detector.record_progress(1)
+        for step in range(2, 11):
+            self.detector.record_tool_call("execute_bash", True, step)
+        self.detector.record_progress(10)  # 第 10 步产生明确进展（如新 Evidence）
+        for step in range(11, 25):
+            self.detector.record_tool_call("execute_bash", True, step)
+        # 24-10=14 < 15：进展把窗口往后推，尚未触发
+        self.assertIsNone(self.detector.check(24, "operator"))
+        # 25-10=15：距上次真实进展 15 步 → 触发
+        trigger = self.detector.check(25, "operator")
         self.assertIsNotNone(trigger)
         self.assertEqual(trigger["trigger"], "no_progress")
 
@@ -63,7 +89,7 @@ class PlanStateTests(unittest.TestCase):
 
     def test_initial_state(self):
         self.assertEqual(self.plan.goal, "渗透测试 target.com")
-        self.assertEqual(self.plan.replan_count, 0)
+        self.assertEqual(self.plan.total_replan_count, 0)
         self.assertEqual(len(self.plan.decision_history), 0)
 
     def test_set_plan_and_criteria(self):
@@ -83,7 +109,7 @@ class PlanStateTests(unittest.TestCase):
             trigger_detail="nmap 连续 2 次失败",
             active_agent_id="operator",
         )
-        self.assertEqual(self.plan.replan_count, 1)
+        self.assertEqual(self.plan.total_replan_count, 1)
         self.assertEqual(len(self.plan.decision_history), 1)
         self.assertIsInstance(decision, DecisionRecord)
         self.assertEqual(decision.trigger, "tool_failure")
@@ -93,7 +119,7 @@ class PlanStateTests(unittest.TestCase):
     def test_multiple_replans_increment_count(self):
         self.plan.trigger_replan("tool_failure", "fail1", "operator")
         self.plan.trigger_replan("no_progress", "no progress 1", "operator")
-        self.assertEqual(self.plan.replan_count, 2)
+        self.assertEqual(self.plan.total_replan_count, 2)
         self.assertEqual(len(self.plan.decision_history), 2)
 
     def test_generate_candidates_for_tool_failure(self):
@@ -116,9 +142,22 @@ class PlanStateTests(unittest.TestCase):
         restored = PlanState.from_serializable(serialized)
         self.assertEqual(restored.goal, self.plan.goal)
         self.assertEqual(restored.current_plan, self.plan.current_plan)
-        self.assertEqual(restored.replan_count, self.plan.replan_count)
+        self.assertEqual(restored.total_replan_count, self.plan.total_replan_count)
         self.assertEqual(len(restored.decision_history), len(self.plan.decision_history))
         self.assertEqual(restored.decision_history[0].trigger, "tool_failure")
+
+    def test_serialization_uses_unambiguous_replan_names(self):
+        """序列化只保留 run_replan_count / total_replan_count，legacy replan_count 必须消失。"""
+        self.plan.trigger_replan("tool_failure", "x", "op")
+        for payload in (self.plan.to_serializable(), self.plan.to_dict()):
+            self.assertIn("total_replan_count", payload)
+            self.assertIn("run_replan_count", payload)
+            self.assertNotIn("replan_count", payload)
+
+    def test_from_serializable_has_no_legacy_replan_count_fallback(self):
+        """旧 replan_count 字段不再被读取：只认 total_replan_count。"""
+        restored = PlanState.from_serializable({"goal": "t", "replan_count": 7})
+        self.assertEqual(restored.total_replan_count, 0)
 
 
 class ReplanLoopSafetyTests(unittest.TestCase):

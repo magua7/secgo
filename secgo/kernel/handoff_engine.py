@@ -261,8 +261,9 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
         todo_tracker = TodoTracker()
 
     # 每次 Run 都重新获得 Run 级额度：清 run_replan_count / exhaustion_notice /
-    # detector 触发窗口；goal、计划、失败历史、决策历史等 Task State 全部保留
-    plan_state.reset_for_new_run()
+    # detector 触发窗口；goal、计划、失败历史、决策历史等 Task State 全部保留。
+    # 窗口起点写入当前累计步数，作为本 Run no_progress 的兜底基线。
+    plan_state.reset_for_new_run(total_step_count)
 
     # Evidence 去重记忆（Run 级）：同一 Flag/关键值在重复验证中只发一次 engine:evidence，
     # 避免同一条关键发现因为多次 curl / Agent 复核产生多张重复证据卡
@@ -350,7 +351,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     },
                     "step": total_step_count,
                 })
-                plan_state.detector.reset_after_replan()
+                plan_state.detector.reset_after_replan(total_step_count)
                 messages.append({
                     "role": "user",
                     "content": (
@@ -367,6 +368,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     trigger=replan_trigger["trigger"],
                     trigger_detail=replan_trigger["detail"],
                     active_agent_id=active_agent_id,
+                    step=total_step_count,
                 )
                 event_bus.emit("decision:reason", {
                     "session_id": sid,
@@ -522,12 +524,17 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 # 不得覆盖 Planner 的 global plan（防止子 Agent 文本污染全局计划）。
                 new_todos = todo_tracker.extract_todo_from_text(response.text)
                 if new_todos:
+                    previous_todos = todo_tracker.get_all_tasks()
                     todo_tracker.update_todo(new_todos)
                     event_bus.emit("todo:updated", {
                         "session_id": sid,
                         "agent_id": agent.id,
                         "todo_list": new_todos,
                     })
+                    # TODO 实质变化（新增 / 勾选完成）属于有效进展，刷新 no_progress 基线；
+                    # Planner 原样重写同一份列表不算进展。
+                    if new_todos != previous_todos:
+                        plan_state.detector.record_progress(total_step_count)
                     # Planner 的真实执行计划同步进 PlanState，使 RePlan 的「原计划」真实可用
                     formatted_plan = todo_tracker.get_formatted_todo()
                     if formatted_plan:
@@ -608,7 +615,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "reason": "completed",
                     "total_steps": total_step_count,
                     "summary": summary,
-                    "replan_count": plan_state.total_replan_count,
+                    "total_replan_count": plan_state.total_replan_count,
                     "run_replan_count": plan_state.run_replan_count,
                     "decision_count": len(plan_state.decision_history),
                 }
@@ -718,16 +725,21 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 })
 
                 # Evidence Gate（分层）：工具成功 + 真实输出 + 命中高价值安全信号才产出 Evidence；
-                # execute_bash / mcp_* 是候选来源，普通输出仍只留在执行轨迹。
+                # execute_bash / web_search / mcp_* 是候选来源，普通输出仍只留在执行轨迹。
+                emitted_evidence = False
                 for evidence_record in build_evidence_records(tc["name"], result):
                     dedupe_key = evidence_dedupe_key(evidence_record)
                     if dedupe_key in seen_evidence_keys:
                         continue
                     seen_evidence_keys.add(dedupe_key)
+                    emitted_evidence = True
                     event_bus.emit("engine:evidence", {
                         "session_id": sid,
                         "evidence": evidence_record,
                     })
+                if emitted_evidence:
+                    # 新证据 = 有效进展：刷新 no_progress 基线（工具成功本身不算进展）
+                    plan_state.detector.record_progress(total_step_count)
 
                 compacted = compact_tool_output(tc["name"], result)
                 removed = max(

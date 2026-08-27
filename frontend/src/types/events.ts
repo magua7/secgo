@@ -7,7 +7,7 @@ export interface AgentThinkingData extends BaseData { agent_id?: AgentId }
 export interface AgentSwitchData extends BaseData { from_agent_id?: AgentId; to_agent_id?: AgentId; reason?: string }
 export interface ToolData extends BaseData { agent_id?: AgentId; tool_name?: string; args?: Record<string, unknown>; result?: unknown }
 export interface StreamData extends BaseData { agent_id?: AgentId; chunk?: string; text?: string }
-export interface EndData extends BaseData { reason?: string; total_steps?: number; error?: string; replan_count?: number; decision_count?: number }
+export interface EndData extends BaseData { reason?: string; total_steps?: number; error?: string; total_replan_count?: number; decision_count?: number }
 export interface ErrorData extends BaseData { agent_id?: AgentId; error?: string }
 export interface TodoData extends BaseData { todo_list?: TodoItem[] }
 export interface AwaitingData extends BaseData { agent_id?: AgentId; message?: string }

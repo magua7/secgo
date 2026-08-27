@@ -160,7 +160,7 @@ class TaskResult:
     success: bool
     steps: int
     tool_calls: int
-    replan_count: int
+    total_replan_count: int
     decision_count: int
     elapsed_seconds: float
     error: Optional[str] = None
@@ -246,7 +246,7 @@ async def run_single_task(task: BenchmarkTask, mode: str) -> TaskResult:
         success=success,
         steps=result.get("total_steps", 0),
         tool_calls=tool_calls,
-        replan_count=result.get("replan_count", 0),
+        total_replan_count=result.get("total_replan_count", 0),
         decision_count=len(decisions),
         elapsed_seconds=round(elapsed, 2),
         error=result.get("error"),
@@ -325,12 +325,12 @@ async def run_benchmark(modes: List[str] = ["full", "single_agent", "no_skills"]
                 mode_result.successful += 1
             mode_result.total_steps += result.steps
             mode_result.total_tool_calls += result.tool_calls
-            mode_result.total_replans += result.replan_count
+            mode_result.total_replans += result.total_replan_count
             mode_result.total_decisions += result.decision_count
             mode_result.total_time += result.elapsed_seconds
 
             status = "✓" if result.success else "✗"
-            print(f"{status} ({result.steps}步, {result.elapsed_seconds:.1f}s, {result.replan_count}次RePlan)", flush=True)
+            print(f"{status} ({result.steps}步, {result.elapsed_seconds:.1f}s, {result.total_replan_count}次RePlan)", flush=True)
 
         all_results.append(mode_result)
 

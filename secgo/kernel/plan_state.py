@@ -109,16 +109,30 @@ class ReplanDetector:
     """检测是否需要触发 RePlan 的守卫。
 
     不直接修改 PlanState，只返回检测结果，由 handoff_engine 决定是否执行 RePlan。
+
+    语义约定：tool_success ≠ meaningful_progress。
+    - record_tool_call 只服务失败类触发器（consecutive_failures / repeated_calls /
+      excessive_failures）：工具成功只重置连续失败计数；
+    - record_progress 显式登记「有效进展」（新 Evidence / TODO 实质更新 / Agent
+      handoff 等结构化信号），只有它刷新 no_progress 基线。
     """
 
     def __init__(self) -> None:
         self._consecutive_failures = 0
         self._tool_call_history: List[Dict[str, Any]] = []  # [{tool_name, success, step}]
         self._last_finding_step = 0
+        # 触发窗口起点（新 Run / RePlan 重置时写入当前步）：从未有过有效进展时
+        # 作为 no_progress 的兜底基线，避免「一直成功但零发现」的会话永远无法触发。
+        self._window_start_step = 0
         self._total_failures = 0
 
     def record_tool_call(self, tool_name: str, success: bool, step: int) -> None:
-        """记录一次工具调用结果。"""
+        """记录一次工具调用结果。
+
+        只服务失败类触发器：工具成功 ≠ 有效进展，pwd / ls / echo 等「执行成功
+        但无新发现」的调用不得刷新 no_progress 基线（否则无意义的成功调用会
+        永远阻止 no_progress 触发）。
+        """
         self._tool_call_history.append({
             "tool_name": tool_name,
             "success": success,
@@ -126,14 +140,21 @@ class ReplanDetector:
         })
         if success:
             self._consecutive_failures = 0
-            self._last_finding_step = step
         else:
             self._consecutive_failures += 1
             self._total_failures += 1
 
+    def record_progress(self, step: int) -> None:
+        """登记一次「有效进展」：新 Evidence / TODO 实质更新 / 新发现等结构化信号。
+
+        由 handoff_engine 在产生明确结构化进展信号时调用；普通成功的工具调用
+        不调用本方法。
+        """
+        self._last_finding_step = step
+
     def record_handoff(self, step: int) -> None:
         """Agent 切换也算一次进展（重置无进展计数）。"""
-        self._last_finding_step = step
+        self.record_progress(step)
 
     def last_failed_tool(self) -> Optional[str]:
         """最近一次失败的工具名（用于候选策略避开重复失败路径）。"""
@@ -142,24 +163,26 @@ class ReplanDetector:
                 return entry.get("tool_name")
         return None
 
-    def reset_after_replan(self) -> None:
+    def reset_after_replan(self, step: int = 0) -> None:
         """RePlan 后重置本轮触发状态，避免下一步因为旧 counter 再次无条件触发。
 
-        历史失败统计保留在 PlanState.failed_attempts（审计用），此处只清触发计数器。
+        历史失败统计保留在 PlanState.failed_attempts（审计用），此处只清触发计数器；
+        触发窗口起点写入当前步，作为后续 no_progress 的兜底基线。
         """
         self._consecutive_failures = 0
         self._tool_call_history = []
         self._total_failures = 0
         self._last_finding_step = 0
+        self._window_start_step = step
 
-    def reset_for_new_run(self) -> None:
+    def reset_for_new_run(self, step: int = 0) -> None:
         """新 Run 启动时清理「当前触发窗口」瞬态（与 RePlan 后重置同一语义）。
 
         连续失败计数、工具调用历史、无进展基准都属于触发窗口，不跨 Run 保留；
         否则上一 Run 尾部的 consecutive_failures=2 会让续跑的第一个循环瞬间再次 RePlan。
         跨 Run 的历史知识（failed_attempts / decision_history）由 PlanState 持有，不受影响。
         """
-        self.reset_after_replan()
+        self.reset_after_replan(step)
 
     def check(self, step: int, active_agent_id: str) -> Optional[Dict[str, Any]]:
         """检查是否需要触发 RePlan。返回触发原因字典或 None。
@@ -167,7 +190,7 @@ class ReplanDetector:
         优先级（高→低）：
         1. excessive_failures — 累计失败过多，全局性问题
         2. repeated_calls — 同一工具连续重复失败，工具选择问题
-        3. no_progress — 长时间无进展（需 last_finding_step > 0）
+        3. no_progress — 长时间无有效进展（基线 = 最近有效进展步，无进展时用窗口起点兜底）
         4. tool_failure — 连续失败但非重复/无进展
         """
         # 1. 累计失败过多（最高优先级）
@@ -193,17 +216,18 @@ class ReplanDetector:
                     ),
                 }
 
-        # 3. 无进展检测（需有历史进展作为基准，避免刚启动就触发）
-        if self._last_finding_step > 0:
-            steps_since_finding = step - self._last_finding_step
-            if steps_since_finding >= REPLAN_TRIGGER_NO_PROGRESS_STEPS:
-                return {
-                    "trigger": "no_progress",
-                    "detail": (
-                        f"已连续 {steps_since_finding} 步无有效发现（自第 {self._last_finding_step} 步起）。"
-                        "建议重新规划搜索方向。"
-                    ),
-                }
+        # 3. 无进展检测：基线取「最近一次有效进展步」；从未有过进展时以触发窗口
+        #    起点兜底，保证零发现的会话也能触发（工具成功本身不算进展）。
+        baseline = self._last_finding_step if self._last_finding_step > 0 else self._window_start_step
+        steps_since_finding = step - baseline
+        if steps_since_finding >= REPLAN_TRIGGER_NO_PROGRESS_STEPS:
+            return {
+                "trigger": "no_progress",
+                "detail": (
+                    f"已连续 {steps_since_finding} 步无有效进展（自第 {baseline} 步起）。"
+                    "建议重新规划搜索方向。"
+                ),
+            }
 
         # 4. 连续失败检测（在其他触发条件之后）
         if self._consecutive_failures >= REPLAN_TRIGGER_TOOL_CONSECUTIVE_FAILURES:
@@ -222,6 +246,7 @@ class ReplanDetector:
             "consecutive_failures": self._consecutive_failures,
             "total_failures": self._total_failures,
             "last_finding_step": self._last_finding_step,
+            "window_start_step": self._window_start_step,
             "tool_call_history": self._tool_call_history[-10:],  # 只保留最近 10 条
         }
 
@@ -236,7 +261,7 @@ class PlanState:
     - run_replan_count：当前这一次 run_engine 已使用多少次 RePlan（每次 Run 从 0 开始，
       用于 maxReplansPerRun 安全额度，不因上一次 Run 耗尽而让新 Run 失去权限）；
     - total_replan_count：整个任务/Session 历史累计发生多少次 RePlan（审计 / Timeline /
-      Benchmark 用，持久化；replan_count 属性保留为 total 的兼容别名）。
+      Benchmark 用，持久化）。
 
     用法：
         plan = PlanState(goal="渗透测试 target.com")
@@ -261,11 +286,6 @@ class PlanState:
         # 属于 Run 临时状态：每次新 Run 必须重置为 False，否则续跑后触发条件会被静默吞掉
         self.exhaustion_notice_injected: bool = False
 
-    @property
-    def replan_count(self) -> int:
-        """兼容别名：历史上只有单一计数，现语义为「累计总次数」。"""
-        return self.total_replan_count
-
     def set_plan(self, plan: str, criteria: Optional[List[str]] = None) -> None:
         """设置当前执行计划。"""
         self.current_plan = plan
@@ -284,15 +304,16 @@ class PlanState:
         if len(self.failed_attempts) > MAX_FAILED_ATTEMPTS:
             del self.failed_attempts[:-MAX_FAILED_ATTEMPTS]
 
-    def reset_for_new_run(self) -> None:
+    def reset_for_new_run(self, step: int = 0) -> None:
         """新 Run 启动：重新获得 Run 级执行额度，但不丢失任务历史。
 
-        - 重置：run_replan_count=0、exhaustion_notice_injected=False、detector 触发窗口；
+        - 重置：run_replan_count=0、exhaustion_notice_injected=False、detector 触发窗口
+          （窗口起点写入 step，作为本 Run 的 no_progress 兜底基线）；
         - 保留：goal、current_plan、success_criteria、failed_attempts、decision_history。
         """
         self.run_replan_count = 0
         self.exhaustion_notice_injected = False
-        self.detector.reset_for_new_run()
+        self.detector.reset_for_new_run(step)
 
     def generate_candidates(self, trigger: str, detail: str, active_agent_id: str) -> List[CandidateStrategy]:
         """根据触发原因生成候选策略。
@@ -426,8 +447,12 @@ class PlanState:
         rejected = [f"{c.id}: {c.description}" for c in candidates if c.id != selected.id]
         return selected, rejected
 
-    def trigger_replan(self, trigger: str, trigger_detail: str, active_agent_id: str) -> DecisionRecord:
-        """触发一次完整的 RePlan 流程：生成候选 → 选择 → 记录。"""
+    def trigger_replan(self, trigger: str, trigger_detail: str, active_agent_id: str,
+                       step: int = 0) -> DecisionRecord:
+        """触发一次完整的 RePlan 流程：生成候选 → 选择 → 记录。
+
+        step 为当前全局步数，用于重置 detector 触发窗口的 no_progress 兜底基线。
+        """
         self.run_replan_count += 1
         self.total_replan_count += 1
         previous_plan = self.current_plan  # 保存「原计划」，绝不在记录后再被新计划覆盖
@@ -462,7 +487,7 @@ class PlanState:
         )
 
         # 关键：RePlan 后重置本轮触发器状态，避免下一步因为旧 counter 再次无条件触发
-        self.detector.reset_after_replan()
+        self.detector.reset_after_replan(step)
 
         return decision
 
@@ -472,7 +497,6 @@ class PlanState:
             "current_plan": self.current_plan,
             "success_criteria": self.success_criteria,
             "failed_attempts": [f.to_dict() for f in self.failed_attempts[-10:]],
-            "replan_count": self.total_replan_count,
             "run_replan_count": self.run_replan_count,
             "total_replan_count": self.total_replan_count,
             "decision_history": [d.to_dict() for d in self.decision_history[-20:]],
@@ -485,8 +509,7 @@ class PlanState:
 
         持久化内容（Task State 层）：
         - goal / current_plan / success_criteria / decision_history / total_replan_count；
-        - failed_attempts：跨 Run 保留的历史失败知识（Planner 据此避开旧路径），截断到最近 MAX 条；
-        - replan_count：total 的兼容镜像（旧版本读取字段），非 Run 级额度。
+        - failed_attempts：跨 Run 保留的历史失败知识（Planner 据此避开旧路径），截断到最近 MAX 条。
         不持久化（Run 临时状态）：run_replan_count、exhaustion_notice_injected、detector 触发窗口。
         """
         return {
@@ -498,7 +521,6 @@ class PlanState:
             ],
             "run_replan_count": 0,  # Run 级计数不落库；写 0 防御性声明语义
             "total_replan_count": self.total_replan_count,
-            "replan_count": self.total_replan_count,  # 兼容镜像：旧读者读 total
             "decision_history": [d.to_dict() for d in self.decision_history[-20:]],
             "exhaustion_notice_injected": False,  # Run 临时状态，新 Run 一律重新允许
         }
@@ -508,7 +530,7 @@ class PlanState:
         """从 session state 恢复 PlanState。
 
         - total_replan_count / failed_attempts / decision_history / plan 恢复为 Task State；
-        - run_replan_count 恒从 0 开始（旧数据中的 replan_count 亦视为累计值兜底）；
+        - run_replan_count 恒从 0 开始；
         - exhaustion_notice_injected 恒为 False（Run 临时状态，绝不跨 Run 继承）；
         - detector 触发窗口（连续失败等瞬态）不再恢复——新 Run 从干净窗口开始，
           避免「继续」后的第一个循环因上一 Run 尾部状态瞬间误触发 RePlan。
@@ -516,9 +538,7 @@ class PlanState:
         state = cls(goal=data.get("goal", ""))
         state.current_plan = data.get("current_plan", "")
         state.success_criteria = list(data.get("success_criteria", []))
-        state.total_replan_count = int(
-            data.get("total_replan_count", data.get("replan_count", 0)) or 0
-        )
+        state.total_replan_count = int(data.get("total_replan_count", 0) or 0)
         state.run_replan_count = 0
         state.exhaustion_notice_injected = False
         # 恢复失败尝试历史（跨 Run 保留的「历史知识」；上限内取最新）

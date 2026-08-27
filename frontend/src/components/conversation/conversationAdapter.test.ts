@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { liveExecutionToTurn, selectTaskExecution, snapshotToExecutionState } from './conversationAdapter'
+import { executionToPresentation, liveExecutionToTurn, selectTaskExecution, snapshotToExecutionState } from './conversationAdapter'
 import { executionReducer } from '../../state/executionReducer'
 import { initialExecutionState } from '../../state/executionReducer'
 import type { PersistedTurn } from '../../types/session'
@@ -119,5 +119,28 @@ describe('snapshot decision restore', () => {
     expect(state.decisions).toHaveLength(1)
     expect(state.decisions[0]!.id).toBe('d1')
     expect(state.decisions[0]!.trigger).toBe('tool_failure')
+  })
+})
+
+describe('historical snapshot internal-control filtering', () => {
+  it('keeps [x] 最终汇报 task_complete out of tasks/completedSteps/keyProgress/执行摘要', () => {
+    const snapshot: RunSnapshot = {
+      ...agentSnapshot('t9')!,
+      tasks: [
+        { text: '探测目标', done: true },
+        { text: '最终汇报 task_complete', done: true },
+      ],
+      key_progress: ['已完成端口扫描', '最终汇报 task_complete'],
+      key_findings: ['发现 /admin 入口'],
+    }
+    const state = snapshotToExecutionState(snapshot)
+    // TODO 列表与 completedSteps 都不得包含内部控制项
+    expect(state.tasks.map((task) => task.text)).toEqual(['探测目标'])
+    expect(state.completedSteps).toEqual(['探测目标'])
+    // keyProgress 不得泄漏内部控制词
+    expect(state.keyProgress).toEqual(['已完成端口扫描'])
+    // 历史执行摘要（presentation.keyProgress = completedSteps+keyFindings+keyProgress 合并）
+    const presentation = executionToPresentation(state)
+    expect(presentation.keyProgress.every((line) => !/task[\s_-]*complete/i.test(line))).toBe(true)
   })
 })

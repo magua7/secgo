@@ -17,29 +17,27 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 # ── Evidence 来源资格（第一层之外的准入名单）────────────────────
-# - EVIDENCE_TOOLS：结果天然是「可复核事实」的工具（web 检索 / DNS / 端口），
-#   成功 + 真实输出即可成为证据（informational/confirmed 事实类）。
-# - CANDIDATE_EVIDENCE_TOOLS / mcp_ 前缀：Evidence 候选来源。候选 ≠ 自动成立：
-#   只有输出命中高价值安全信号（Flag、认证绕过、漏洞验证成功、CVE、开放端口、
-#   服务 Banner、敏感信息泄露等）才进入关键证据；普通输出只留在执行轨迹。
-EVIDENCE_TOOLS = {"web_search", "dns_lookup", "port_scan"}
-CANDIDATE_EVIDENCE_TOOLS = {"execute_bash", "execute_workspace_script"}
+# - EVIDENCE_TOOLS：结果天然是「对目标的直接探测事实」的工具（DNS / 端口），
+#   成功 + 真实输出即可成为证据（confirmed 事实类）。
+# - CANDIDATE_EVIDENCE_TOOLS（含 web_search）/ mcp_ 前缀：Evidence 候选来源。
+#   候选 ≠ 自动成立：只有输出命中高价值安全信号（Flag、认证绕过、漏洞验证成功、
+#   CVE、exploit/advisory 情报、敏感信息泄露等）才进入关键证据；普通输出只留在执行轨迹。
+#   web_search 尤其如此：右栏是「关键证据」，普通网页搜索内容 ≠ 关键证据。
+EVIDENCE_TOOLS = {"dns_lookup", "port_scan"}
+CANDIDATE_EVIDENCE_TOOLS = {"execute_bash", "execute_workspace_script", "web_search"}
 
 _EVIDENCE_TITLE_BY_TOOL = {
-    "web_search": "网页搜索结果",
     "dns_lookup": "DNS 查询结果",
     "port_scan": "端口扫描结果",
 }
 
 _EVIDENCE_TYPE_BY_TOOL = {
-    "web_search": "finding",
     "dns_lookup": "network",
     "port_scan": "network",
 }
 
-# trusted 工具的置信度：端口/DNS 是对目标的直接探测事实，搜索是辅助情报
+# trusted 工具的置信度：端口/DNS 是对目标的直接探测事实
 _EVIDENCE_CONFIDENCE_BY_TOOL = {
-    "web_search": "informational",
     "dns_lookup": "confirmed",
     "port_scan": "confirmed",
 }
@@ -175,7 +173,26 @@ _EVIDENCE_SIGNAL_DEFS = (
             ),
         ),
     },
+    {
+        # exploit / advisory / PoC 类明确攻击指标（常见于 web_search 情报结果）
+        "key": "exploit_intel",
+        "title": "发现漏洞利用/安全公告情报",
+        "type": "finding",
+        "confidence": "probable",
+        "patterns": (
+            re.compile(r"\bEDB-\d{4,7}\b", re.IGNORECASE),
+            re.compile(r"\bpublic(?:ly)?\s+(?:available\s+)?exploit\b", re.IGNORECASE),
+            re.compile(r"\bexploit\s+(?:code|chain|payload)\s+(?:is\s+)?available\b", re.IGNORECASE),
+            re.compile(r"\b(?:security|vulnerability)\s+advisory\b", re.IGNORECASE),
+            re.compile(r"\bproof[\s-]*of[\s-]*concept\b", re.IGNORECASE),
+        ),
+    },
 )
+
+# web_search 的信号白名单：搜索结果只有命中「安全情报类」信号才进入关键证据。
+# open_ports / service_banner 是对目标的直接探测信号——它们出现在搜索结果里
+# 只是普通技术文档内容（如 nginx 版本介绍），不构成关键证据。
+_WEB_SEARCH_SIGNAL_KEYS = {"exploit_success", "auth_privilege", "cve_intel", "sensitive_leak", "exploit_intel"}
 
 _MAX_EVIDENCE_PER_RESULT = 4
 
@@ -240,10 +257,10 @@ def build_evidence_records(tool_name: str, result: Dict[str, Any]) -> List[Dict[
     判定链：执行成功？ → 有真实有效输出？ → 是否命中高价值安全发现？ → 是否重复？
     - 第一层（确定性 Gate）：success=False / 空输出 / no-result / timeout 等一律拒绝；
     - 第二层（结构化规则）：按结果内容匹配 Flag / 漏洞验证 / 认证绕过 / CVE /
-      开放端口 / Banner / 敏感泄露等信号，候选工具（execute_bash、mcp_* 等）
-      只有命中信号才成为证据——普通 ls、打开首页不会进入关键证据；
-    - trusted 工具（web_search / dns_lookup / port_scan）保持旧行为：
-      成功且有真实输出即为事实类证据；若同时命中更强信号则用具体信号卡片。
+      exploit-advisory 情报 / 敏感泄露等信号，候选工具（execute_bash、web_search、
+      mcp_* 等）只有命中信号才成为证据——普通 ls、普通网页介绍不会进入关键证据；
+    - trusted 工具（dns_lookup / port_scan）保持旧行为：成功且有真实输出即为
+      对目标的直接探测事实；若同时命中更强信号则用具体信号卡片。
     """
     if not result.get("success"):
         return []
@@ -273,9 +290,13 @@ def build_evidence_records(tool_name: str, result: Dict[str, Any]) -> List[Dict[
             extra_metadata={"flag": flag_value},
         ))
 
+    # web_search 只允许安全情报类信号（其余搜索内容留在执行轨迹 / Research 输出）
+    allowed_signal_keys = _WEB_SEARCH_SIGNAL_KEYS if tool_name == "web_search" else None
     used_signal_keys: set[str] = set()
     for sig in _EVIDENCE_SIGNAL_DEFS:
         if sig["key"] in used_signal_keys or len(records) >= _MAX_EVIDENCE_PER_RESULT:
+            continue
+        if allowed_signal_keys is not None and sig["key"] not in allowed_signal_keys:
             continue
         for pattern in sig["patterns"]:
             match = pattern.search(text)
@@ -317,8 +338,8 @@ def classify_tool_evidence(tool_name: str, result: Dict[str, Any]) -> Optional[D
     """兼容入口：返回该工具结果的首条 Evidence（或 None）。
 
     分层 Gate 见 build_evidence_records：只有「执行成功 + 存在真实有效结果 +
-    不是 error/no-result/timeout」且命中高价值信号（trusted 工具可为通用事实类）
-    才会成为证据。工具类型只是来源资格，不是成立条件。
+    不是 error/no-result/timeout」且命中高价值信号（dns/port 等直接探测类
+    trusted 工具可为通用事实类）才会成为证据。工具类型只是来源资格，不是成立条件。
     """
     records = build_evidence_records(tool_name, result)
     return records[0] if records else None

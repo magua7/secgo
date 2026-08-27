@@ -147,6 +147,34 @@ class BudgetContinuityTests(unittest.IsolatedAsyncioTestCase):
         # Run2 确实触发了 1 次真实 RePlan（额度重新获得，未被旧计数吞掉）
         self.assertEqual(len(self._replan_decisions()), 1)
 
+    async def test_no_progress_triggers_on_successful_calls_without_findings(self):
+        """no_progress 语义修复回归：连续成功但零发现（pwd/ls/echo 式）的调用必须能触发 no_progress。"""
+        config = self._config(max_replans=2, max_steps=17)
+        # 每一步都是「工具成功、无任何安全信号、无 TODO 更新」的普通输出
+        plain_tool = AsyncMock(return_value={"success": True, "output": "README.md\nsrc"})
+        responses = [
+            _response("", [_call("execute_bash", {"cmd": f"step-{i}"}, f"c{i}")])
+            for i in range(17)
+        ]
+        result, _, _ = await self._run(responses, config, execute_tool=plain_tool)
+        self.assertEqual(result["reason"], "max_steps")
+        triggers = [d["decision"]["trigger"] for d in self._replan_decisions()]
+        self.assertIn("no_progress", triggers)
+
+    async def test_no_progress_counter_refreshes_on_new_evidence(self):
+        """期间产生一次明确 Evidence → no_progress 计数被正确刷新，窗口内不得误触发。"""
+        config = self._config(max_replans=2, max_steps=12)
+        outputs = [{"success": True, "output": "Flag: CTF{progress_refresh_flag}"}] + [
+            {"success": True, "output": "README.md\nsrc"} for _ in range(11)
+        ]
+        tool = AsyncMock(side_effect=outputs)
+        responses = [_response("", [_call("execute_bash", {}, f"c{i}")]) for i in range(12)]
+        result, _, _ = await self._run(responses, config, execute_tool=tool)
+        self.assertEqual(result["reason"], "max_steps")
+        # 第 1 步产出 Flag 证据（有效进展），此后 11 步无发现：距基线最多 11 步 < 15
+        self.assertTrue(any(event == "engine:evidence" for event, _ in self.events))
+        self.assertEqual([d["decision"]["trigger"] for d in self._replan_decisions()], [])
+
     async def test_exhaustion_notice_does_not_carry_over(self):
         """第一 Run 注入的 exhaustion_notice 不跨 Run：新 Run 仍允许 RePlan。"""
         config = self._config(max_replans=2)
@@ -161,7 +189,6 @@ class BudgetContinuityTests(unittest.IsolatedAsyncioTestCase):
                 "current_plan": "[RePlan #2] ...",
                 "success_criteria": [],
                 "failed_attempts": [],
-                "replan_count": 2,
                 "total_replan_count": 2,
                 "decision_history": [],
                 "exhaustion_notice_injected": True,
@@ -191,7 +218,7 @@ class BudgetContinuityTests(unittest.IsolatedAsyncioTestCase):
                 "current_plan": "p",
                 "success_criteria": [],
                 "failed_attempts": [],
-                "replan_count": 0,
+                "total_replan_count": 0,
                 "decision_history": [],
                 "exhaustion_notice_injected": False,
                 # 旧版本会把连续失败窗口持久化：新 Run 不应继承
@@ -219,7 +246,7 @@ class BudgetContinuityTests(unittest.IsolatedAsyncioTestCase):
                 "current_plan": "PLANNER-ORIGINAL",
                 "success_criteria": [],
                 "failed_attempts": [],
-                "replan_count": 0,
+                "total_replan_count": 0,
                 "decision_history": [],
                 "exhaustion_notice_injected": False,
                 "detector": {},

@@ -114,11 +114,19 @@ export function snapshotToExecutionState(snapshot: RunSnapshot): ExecutionState 
   const report = snapshot.final_report ?? snapshot.partial_report ?? snapshot.last_assistant_output ?? ''
   const status = snapshotStatusMap[snapshot.status] ?? 'idle'
   const phase = snapshotPhaseMap[snapshot.phase] ?? 'idle'
+  // 统一清洗一次：raw snapshot.tasks → sanitizeTodoItems → sanitizedTasks。
+  // 所有派生状态（tasks / completedSteps）都必须基于 sanitizedTasks，
+  // 禁止一部分用 sanitized、一部分继续用 raw snapshot.tasks，
+  // 否则「[x] 最终汇报 task_complete」会从 completedSteps 泄漏回界面。
+  const sanitizedTasks = sanitizeTodoItems(snapshot.tasks ?? [])
+  // keyProgress / keyFindings 同样不得携带内部控制词（历史快照可能是脏数据）
+  const cleanInternalRefs = (lines: readonly string[] | null | undefined): string[] =>
+    (lines ?? []).filter((line) => !referencesInternalControl(line))
   return {
     status,
     phase,
     activeAgent: snapshot.active_agent ?? 'planner',
-    tasks: sanitizeTodoItems(snapshot.tasks ?? []),
+    tasks: sanitizedTasks,
     timeline: (snapshot.timeline ?? []).map((item) => ({ ...item })),
     tools: (snapshot.resources ?? []).map((resource) => ({
       name: resource.name,
@@ -141,11 +149,11 @@ export function snapshotToExecutionState(snapshot: RunSnapshot): ExecutionState 
       reason: item.reason as string ?? '',
       rejected: item.rejected as string[] ?? [],
     })),
-    findings: snapshot.key_findings ?? [],
-    completedSteps: (snapshot.tasks ?? []).filter((task) => task.done).map((task) => task.text),
-    keyFindings: snapshot.key_findings ?? [],
+    findings: cleanInternalRefs(snapshot.key_findings),
+    completedSteps: sanitizedTasks.filter((task) => task.done).map((task) => task.text),
+    keyFindings: cleanInternalRefs(snapshot.key_findings),
     narrativeUpdates: snapshot.narrative_updates ?? [],
-    keyProgress: snapshot.key_progress ?? [],
+    keyProgress: cleanInternalRefs(snapshot.key_progress),
     report,
     currentActivity: referencesInternalControl(snapshot.current_activity ?? '')
       ? (status === 'completed' ? '研判完成' : '最终汇报已完成')

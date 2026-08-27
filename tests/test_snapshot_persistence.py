@@ -25,12 +25,56 @@ class EvidenceClassificationTests(unittest.TestCase):
         self.assertIsNone(classify_tool_evidence("execute_bash", {"success": True, "output": "x"}))
         self.assertIsNone(classify_tool_evidence("handoff_to_agent", {"success": True, "output": "x"}))
 
-    def test_web_search_is_evidence_but_mcp_prefix_is_not_auto_evidence(self):
-        record = classify_tool_evidence("web_search", {"success": True, "output": "found"})
-        self.assertIsNotNone(record)
-        self.assertEqual(record["source"], "web_search")
+    def test_web_search_generic_result_is_not_evidence(self):
+        """web_search 是证据候选而非天然可信来源：普通网页内容不得进入关键证据。"""
+        self.assertIsNone(classify_tool_evidence("web_search", {"success": True, "output": "found"}))
+        self.assertIsNone(classify_tool_evidence("web_search", {
+            "success": True,
+            "output": (
+                "Apache HTTP Server 官方网站：产品介绍、功能特性与下载页面。"
+                "普通技术文档与官网介绍不构成关键证据。 https://httpd.apache.org/"
+            ),
+        }))
+
+    def test_web_search_mcp_prefix_is_still_not_auto_evidence(self):
         # mcp_ 前缀不自动成为证据：工具来源 ≠ 证据成立；内容命中安全信号才算
         self.assertIsNone(classify_tool_evidence("mcp_scan", {"success": True, "output": "found"}))
+
+    def test_web_search_cve_intel_is_evidence(self):
+        """明确 CVE + 目标组件版本匹配的漏洞情报 → 允许进入关键证据。"""
+        record = classify_tool_evidence("web_search", {
+            "success": True,
+            "output": (
+                "CVE-2021-41773：Apache HTTP Server 2.4.49 路径遍历漏洞，"
+                "与当前目标组件版本明确匹配，官方已发布安全公告。"
+            ),
+        })
+        self.assertIsNotNone(record)
+        self.assertEqual(record["source"], "web_search")
+        self.assertEqual(record["metadata"]["signal"], "cve_intel")
+
+    def test_web_search_exploit_advisory_is_evidence(self):
+        """exploit / advisory / PoC 等明确攻击指标 → 允许进入关键证据。"""
+        record = classify_tool_evidence("web_search", {
+            "success": True,
+            "output": (
+                "Security advisory: public exploit available for the target component, "
+                "PoC published as EDB-50383."
+            ),
+        })
+        self.assertIsNotNone(record)
+        self.assertEqual(record["source"], "web_search")
+        self.assertEqual(record["metadata"]["signal"], "exploit_intel")
+
+    def test_dns_lookup_plain_result_is_still_evidence(self):
+        """dns_lookup 保持可信来源：明确解析结果继续进入关键证据。"""
+        record = classify_tool_evidence("dns_lookup", {
+            "success": True,
+            "output": "example.com. 300 IN A 93.184.216.34",
+        })
+        self.assertIsNotNone(record)
+        self.assertEqual(record["source"], "dns_lookup")
+        self.assertEqual(record["metadata"]["signal"], "generic_fact")
 
     def test_empty_output_is_not_evidence(self):
         self.assertIsNone(classify_tool_evidence("web_search", {"success": True, "output": "(no output)"}))
