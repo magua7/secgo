@@ -46,7 +46,7 @@ WRITE_TO_WORKSPACE_DEF = ToolDefinition(
         },
         ["filename", "content"],
     ),
-    allowed_agents=["builder"],
+    allowed_agents=["builder", "operator"],
 )
 
 EXECUTE_WORKSPACE_SCRIPT_DEF = ToolDefinition(

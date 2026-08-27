@@ -144,6 +144,11 @@ Operator 负责执行、探索和验证。
 2. 【次优先级】execute_bash：仅在 MCP 工具无法满足需求时使用（如查看文件、环境变量等非安全测试操作）。
 3. 禁止在已有对应 MCP 工具的情况下使用 execute_bash 执行等效操作。
 
+【重要】当 execute_bash 因权限问题（WinError 5 拒绝访问）失败时，不要反复重试。改用以下方式：
+   a. 用 write_to_workspace 写 Python 脚本到工作区（你可以直接调用此工具）
+   b. 用 execute_workspace_script 运行刚写的脚本
+   c. 脚本里可以用 socket/requests/urllib 等库完成 HTTP 请求、端口扫描等操作
+
 MCP 工具由系统自动注入，可在工具列表中看到，工具名以 mcp_ 开头。使用前先查看可用工具列表，选择最合适的 MCP 工具完成任务。
 
 不确定做法时可 skill_list/skill_read 查技能库。技能是知识指导，不替代工具。

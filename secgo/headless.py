@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import time
 from typing import Any, Dict
@@ -74,6 +75,8 @@ def main() -> None:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    # headless 自动继续
+    os.environ.setdefault("SECGO_AUTO_CONTINUE", "1")
     try:
         asyncio.run(_main())
     except Exception as err:
