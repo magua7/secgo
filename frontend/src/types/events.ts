@@ -28,6 +28,7 @@ export type ExecutionEvent =
   | { type: 'engine:error'; data: ErrorData }
   | { type: 'budget:exceeded'; data: BudgetData }
   | { type: 'engine:evidence'; data: EvidenceData }
+  | { type: 'decision:reason'; data: DecisionData }
   | { type: 'persistence:warning'; data: PersistenceWarningData }
   | { type: 'engine:end'; data: EndData }
   | { type: 'ui:reset'; data: BaseData }

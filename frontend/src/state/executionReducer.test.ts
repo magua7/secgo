@@ -176,7 +176,7 @@ describe('decision:reason event', () => {
     const state = executionReducer(initialExecutionState, { type: 'ui:reset', data: {} })
     const next = executionReducer(state, { type: 'decision:reason', data: { decision: { id: 'd1', timestamp: 1000, trigger: 'tool_failure', trigger_detail: 'nmap 连续 2 次失败', observation: '', candidates: [{ id: 'c1-a', description: '换工具', target_agent: 'operator', suggested_tools: [], risk: 'low', expected_outcome: 'x' }], selected: 'c1-a', reason: '选择换工具', rejected: [] }, step: 12 } })
     expect(next.decisions).toHaveLength(1)
-    expect(next.decisions[0].trigger).toBe('tool_failure')
+    expect(next.decisions[0]!.trigger).toBe('tool_failure')
     expect(next.timeline.some((t) => t.kind === 'finding')).toBe(true)
   })
 })

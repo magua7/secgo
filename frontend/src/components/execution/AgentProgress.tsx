@@ -4,12 +4,24 @@ const agents = [
   { id: 'planner', label: '规划', name: 'Planner' },
   { id: 'research', label: '检索', name: 'Research' },
   { id: 'operator', label: '验证', name: 'Operator' },
-  { id: 'builder', label: '报告', name: 'Builder' },
+  { id: 'builder', label: '构建', name: 'Builder' },
 ]
 
-export function AgentProgress({ activeAgent, status }: { activeAgent: AgentId; status: ExecutionStatus }) {
-  const active = Math.max(0, agents.findIndex((agent) => agent.id === activeAgent))
-  return <div className="agent-progress">{agents.map((agent, index) => <div className={`${index < active || status === 'completed' ? 'done' : ''} ${index === active && status === 'running' ? 'active' : ''}`} key={agent.id} title={agent.name}>
-    <i>{index < active || status === 'completed' ? '✓' : index + 1}</i><span>{agent.label}<small>{agent.name}</small></span>
-  </div>)}</div>
+interface Props {
+  activeAgent: AgentId
+  status: ExecutionStatus
+  participatedAgents?: AgentId[]
+}
+
+export function AgentProgress({ activeAgent, status, participatedAgents = [] }: Props) {
+  const running = status === 'running' || status === 'loading' || status === 'awaiting_input'
+  const participated = new Set(participatedAgents)
+  return <div className="agent-progress">{agents.map((agent) => {
+    const isActive = running && agent.id === activeAgent
+    const isParticipated = !isActive && participated.has(agent.id)
+    return <div className={`agent-state ${isActive ? 'active' : ''} ${isParticipated ? 'participated' : ''}`} key={agent.id} title={agent.name}>
+      <i className="agent-dot" />
+      <span>{agent.label}<small>{agent.name}</small></span>
+    </div>
+  })}</div>
 }

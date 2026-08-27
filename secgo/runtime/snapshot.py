@@ -48,17 +48,47 @@ def is_evidence_tool(tool_name: str) -> bool:
     return tool_name in EVIDENCE_TOOLS or tool_name.startswith("mcp_")
 
 
+_NO_RESULT_MARKERS = (
+    "no search results found", "no search results", "no results found", "no results",
+    "no result", "no data", "0 results", "no matches", "no records", "nothing found",
+    "no vulnerabilities found", "no open ports", "not found", "no output", "no search result",
+)
+
+
+def _is_no_result_output(text: str) -> bool:
+    """识别「无有效结果」输出：空结果不应成为关键证据。"""
+    low = text.strip().lower().rstrip(".。！!")
+    if not low:
+        return True
+    if low in _NO_RESULT_MARKERS:
+        return True
+    if len(low) <= 120 and any(
+        low.startswith(m) for m in ("no search", "no results", "no result", "no data",
+                                    "no matches", "0 results", "nothing found", "not found")
+    ):
+        return True
+    return False
+
+
 def classify_tool_evidence(tool_name: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """把单个工具结果转换为 EvidenceRecord（或 None）。
 
-    只有明确属于证据语义的工具结果才会成为证据；普通 Tool Result 一律不进 Evidence。
+    证据 Gate：只有「工具执行成功 + 存在真实有效结果 + 不是 error/no-result/timeout」才会成为证据。
+    - 工具失败（success=False）绝不成为证据；
+    - "No search results found" / 空结果 / 明显无结果输出不成为证据；
+    - 工具类型（web_search / mcp_*）只是候选，内容仍须通过 Gate。
     """
     if not is_evidence_tool(tool_name):
         return None
-    output = result.get("output") if result.get("success") else result.get("error")
+    if not result.get("success"):
+        return None
+    output = result.get("output")
     if output in (None, "", "(no output)"):
         return None
-    summary = _bounded(output, _SNAPSHOT_SUMMARY_CHARS)
+    text = output if isinstance(output, str) else str(output)
+    if _is_no_result_output(text):
+        return None
+    summary = _bounded(text, _SNAPSHOT_SUMMARY_CHARS)
     return {
         "id": f"evidence-{uuid.uuid4().hex[:12]}",
         "type": _EVIDENCE_TYPE_BY_TOOL.get(tool_name, "finding" if tool_name.startswith("mcp_") else "artifact"),
@@ -264,7 +294,25 @@ class RunSnapshotRecorder:
         elif event_type == "engine:evidence":
             evidence = data.get("evidence")
             if isinstance(evidence, dict):
-                self.evidence.append(evidence)
+                # 去重：同源 + 同摘要只保留一份
+                if not any(
+                    item.get("source") == evidence.get("source") and item.get("summary") == evidence.get("summary")
+                    for item in self.evidence
+                ):
+                    self.evidence.append(evidence)
+        elif event_type == "decision:reason":
+            decision = data.get("decision")
+            if isinstance(decision, dict):
+                trigger_detail = _bounded(decision.get("trigger_detail"), 200)
+                reason = _bounded(decision.get("reason"), 200)
+                self.decisions.append(decision)
+                # 决策同时在执行轨迹留下简版节点
+                self._add_timeline(
+                    "finding",
+                    "◆ 策略调整",
+                    detail=f"{trigger_detail} → {reason}".strip(" →"),
+                    status="completed",
+                )
         elif event_type == "engine:text":
             text = (data.get("text") or "").strip()
             agent = data.get("agent_id") or self.active_agent

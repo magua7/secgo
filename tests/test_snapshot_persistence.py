@@ -22,6 +22,39 @@ class EvidenceClassificationTests(unittest.TestCase):
     def test_empty_output_is_not_evidence(self):
         self.assertIsNone(classify_tool_evidence("web_search", {"success": True, "output": "(no output)"}))
 
+    def test_no_search_results_is_not_evidence(self):
+        self.assertIsNone(classify_tool_evidence("web_search", {"success": True, "output": "No search results found."}))
+
+    def test_tool_error_is_not_evidence(self):
+        self.assertIsNone(classify_tool_evidence("web_search", {"success": False, "error": "connection failed"}))
+        self.assertIsNone(classify_tool_evidence("port_scan", {"success": False, "error": "permission denied"}))
+
+    def test_valid_port_scan_is_evidence(self):
+        record = classify_tool_evidence("port_scan", {"success": True, "output": "80/tcp open\n443/tcp open"})
+        self.assertIsNotNone(record)
+        self.assertEqual(record["source"], "port_scan")
+
+
+class EvidenceDedupeTests(unittest.TestCase):
+    def test_snapshot_dedupes_same_evidence(self):
+        from secgo.runtime.snapshot import RunSnapshotRecorder
+        recorder = RunSnapshotRecorder("s1", run_id="r1")
+        recorder.apply("engine:evidence", {"evidence": {"id": "e1", "source": "port_scan", "summary": "80/tcp open"}})
+        recorder.apply("engine:evidence", {"evidence": {"id": "e2", "source": "port_scan", "summary": "80/tcp open"}})
+        self.assertEqual(len(recorder.evidence), 1)
+
+    def test_decision_reason_enters_snapshot_and_timeline(self):
+        from secgo.runtime.snapshot import RunSnapshotRecorder
+        recorder = RunSnapshotRecorder("s1", run_id="r1")
+        decision = {
+            "id": "d1", "timestamp": 1000, "trigger": "tool_failure", "trigger_detail": "nmap 连续失败",
+            "observation": "原计划: x", "candidates": [], "selected": "", "reason": "换策略", "rejected": [],
+        }
+        recorder.apply("decision:reason", {"decision": decision})
+        self.assertEqual(len(recorder.decisions), 1)
+        self.assertEqual(recorder.to_dict()["decisions"][0]["id"], "d1")
+        self.assertTrue(any(item["kind"] == "finding" and "策略调整" in item["title"] for item in recorder.timeline))
+
 
 class LegacyTurnsTests(unittest.TestCase):
     def test_recovers_user_question_and_strips_attachment_prompt(self):

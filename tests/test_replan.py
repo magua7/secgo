@@ -121,5 +121,52 @@ class PlanStateTests(unittest.TestCase):
         self.assertEqual(restored.decision_history[0].trigger, "tool_failure")
 
 
+class ReplanLoopSafetyTests(unittest.TestCase):
+    """RePlan 后触发状态必须重置，且能区分原计划/新计划。"""
+
+    def test_reset_after_replan_clears_trigger_state(self):
+        detector = ReplanDetector()
+        detector.record_tool_call("nmap", False, 1)
+        detector.record_tool_call("nmap", False, 2)
+        self.assertIsNotNone(detector.check(3, "operator"))
+        detector.reset_after_replan()
+        self.assertIsNone(detector.check(4, "operator"))
+        self.assertEqual(detector._total_failures, 0)
+        self.assertEqual(detector._consecutive_failures, 0)
+
+    def test_trigger_replan_distinguishes_original_and_new_plan(self):
+        plan = PlanState(goal="t")
+        plan.set_plan("原计划：扫描 80 端口")
+        plan.add_failure("operator", "nmap", "err", step=1)
+        decision = plan.trigger_replan("tool_failure", "nmap 连续失败", "operator")
+        # 原计划保留在 decision.observation，current_plan 只保存新计划
+        self.assertIn("原计划：扫描 80 端口", decision.observation)
+        self.assertIn("[RePlan #1]", plan.current_plan)
+        self.assertNotEqual(plan.current_plan, "原计划：扫描 80 端口")
+
+    def test_replan_count_guards_max(self):
+        from secgo.kernel.plan_state import MAX_REPLANS
+        self.assertGreater(MAX_REPLANS, 0)
+
+    def test_exhaustion_notice_flag_roundtrip(self):
+        plan = PlanState(goal="t")
+        self.assertFalse(plan.exhaustion_notice_injected)
+        plan.exhaustion_notice_injected = True
+        restored = PlanState.from_serializable(plan.to_serializable())
+        self.assertTrue(restored.exhaustion_notice_injected)
+
+
+class StrategySelectionTests(unittest.TestCase):
+    def test_select_strategy_avoids_recently_failed_tool(self):
+        plan = PlanState(goal="t")
+        candidates = [
+            CandidateStrategy("c-a", "更换替代工具", "operator", ["nmap"], "low", "x"),
+            CandidateStrategy("c-b", "切换 Agent 重新规划", "planner", [], "medium", "x"),
+        ]
+        selected, rejected = plan.select_strategy(candidates, "tool_failure", "operator", failed_tool="nmap")
+        self.assertEqual(selected.id, "c-b")  # 避开刚失败的 nmap
+        self.assertEqual(len(rejected), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

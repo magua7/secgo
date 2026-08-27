@@ -195,7 +195,7 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
       return {
         ...state,
         decisions: [...state.decisions, record],
-        timeline: [...state.timeline, line(state, { kind: 'finding', title: `决策: ${record.trigger}`, detail: record.reason.slice(0, 180), status: 'completed' })],
+        timeline: [...state.timeline, line(state, { kind: 'finding', title: '◆ 策略调整', detail: `${record.trigger_detail} → ${record.reason}`.slice(0, 180), status: 'completed' })],
       }
     }
     case 'persistence:warning':

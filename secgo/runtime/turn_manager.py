@@ -18,7 +18,7 @@ _TURN_EVENTS = (
     "engine:start", "agent:thinking", "agent:switch", "tool:call", "tool:result",
     "engine:text", "engine:end", "budget:exceeded", "engine:error", "todo:updated",
     "tool:stream-start", "tool:stream-end", "engine:awaiting_input", "engine:user_input",
-    "engine:evidence",
+    "engine:evidence", "decision:reason",
 )
 
 _TURN_BOUNDARY_EVENTS = {"engine:end", "engine:awaiting_input"}

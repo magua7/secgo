@@ -16,7 +16,7 @@ from ..runtime.session import SessionManager, resolve_session_db_path
 from ..runtime.snapshot import classify_tool_evidence
 from ..tools.executor import execute_tool
 from ..tools.mcp_client import mcp_client
-from .plan_state import PlanState, ReplanDetector, DecisionRecord
+from .plan_state import PlanState, ReplanDetector, DecisionRecord, MAX_REPLANS
 from ..tools.registry import (
     all_tool_definitions,
     build_tool_set,
@@ -282,8 +282,40 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
 
             # ── RePlan 检测 ──────────────────────────────────────
             replan_trigger = plan_state.detector.check(step_count, active_agent_id)
-            if replan_trigger is not None:
-                # 触发生成决策
+            if (
+                replan_trigger is not None
+                and plan_state.replan_count >= MAX_REPLANS
+                and not plan_state.exhaustion_notice_injected
+            ):
+                # 达到最大重规划次数 → 明确 fallback：不再 RePlan，注入收尾指引（一次性）
+                plan_state.exhaustion_notice_injected = True
+                event_bus.emit("decision:reason", {
+                    "session_id": sid,
+                    "decision": {
+                        "id": f"decision-exhausted-{uuid.uuid4().hex[:8]}",
+                        "timestamp": time.time(),
+                        "trigger": "replan_exhausted",
+                        "trigger_detail": f"已达到最大重规划次数 {MAX_REPLANS}",
+                        "observation": plan_state.current_plan[:500],
+                        "candidates": [],
+                        "selected": "",
+                        "reason": "重规划次数已达上限，改为基于现有发现总结收尾",
+                        "rejected": [],
+                    },
+                    "step": step_count,
+                })
+                plan_state.detector.reset_after_replan()
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[系统提示] 已达最大重规划次数。请基于已有发现总结当前进展；"
+                        "若是子 Agent，请 handoff 给 Planner，由 Planner 决定继续或收尾。"
+                    ),
+                })
+            elif replan_trigger is not None and plan_state.replan_count < MAX_REPLANS:
+                # 触发生成决策（trigger_replan 内部会重置本轮触发器状态）
+                # 注：达到 MAX_REPLANS 后（无论提示是否注入过）一律不再 RePlan，静默吞掉触发条件
+                old_plan = plan_state.current_plan
                 decision = plan_state.trigger_replan(
                     trigger=replan_trigger["trigger"],
                     trigger_detail=replan_trigger["detail"],
@@ -296,14 +328,17 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 })
                 replan_prompt = REPLAN_SYSTEM_PROMPT.format(
                     trigger=replan_trigger["detail"],
-                    current_plan=plan_state.current_plan[:200],
+                    current_plan=old_plan[:200],  # 原计划（触发前），绝不把新计划误标为「原计划」
                 )
                 messages.append({
                     "role": "user",
                     "content": replan_prompt,
                 })
-                # 如果是 handoff 回 Planner 的策略,强制 handoff
-                if decision.candidates and decision.candidates[0].target_agent == "planner" and active_agent_id != "planner":
+                # 如果选中的策略目标是 handoff 回 Planner，强制 handoff
+                selected_target = next(
+                    (c.target_agent for c in decision.candidates if c.id == decision.selected), None
+                )
+                if selected_target == "planner" and active_agent_id != "planner":
                     prev_agent_id = active_agent_id
                     active_agent_id = "planner"
                     event_bus.emit("agent:switch", {
@@ -461,6 +496,10 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                         "session_id": sid,
                         "todo_list": new_todos,
                     })
+                    # Planner 的真实执行计划同步进 PlanState，使 RePlan 的「原计划」真实可用
+                    formatted_plan = todo_tracker.get_formatted_todo()
+                    if formatted_plan:
+                        plan_state.set_plan(formatted_plan)
 
             fallback_calls = []
             if not supports_tools and response.text:

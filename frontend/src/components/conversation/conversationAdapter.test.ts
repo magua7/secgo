@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { liveExecutionToTurn, selectTaskExecution } from './conversationAdapter'
+import { liveExecutionToTurn, selectTaskExecution, snapshotToExecutionState } from './conversationAdapter'
 import { executionReducer } from '../../state/executionReducer'
 import { initialExecutionState } from '../../state/executionReducer'
 import type { PersistedTurn } from '../../types/session'
 import type { ExecutionState } from '../../types/execution'
+import type { RunSnapshot } from '../../types/snapshot'
 
 describe('conversation adapters', () => {
   it('treats a completed live report as the final answer but running text as activity', () => {
@@ -102,5 +103,21 @@ describe('selectTaskExecution', () => {
 
   it('returns null when there are no turns', () => {
     expect(selectTaskExecution(false, null, [])).toBeNull()
+  })
+})
+
+describe('snapshot decision restore', () => {
+  it('restores decisions from a persisted RunSnapshot', () => {
+    const snapshot: RunSnapshot = {
+      run_id: 'r1', session_id: 's1', turn_id: 't1', status: 'completed', phase: 'completed', reason: 'completed', error: null,
+      active_agent: 'planner', started_at: 1000, ended_at: 2000, current_activity: '', narrative_updates: [],
+      key_progress: [], key_findings: [], tasks: [], timeline: [], evidence: [], resources: [],
+      final_report: 'done', partial_report: null, decisions: [{ id: 'd1', timestamp: 1000, trigger: 'tool_failure', trigger_detail: 'x', observation: '', candidates: [], selected: '', reason: '换策略', rejected: [] }],
+      tool_count: 0, evidence_count: 0, total_steps: 3,
+    }
+    const state = snapshotToExecutionState(snapshot)
+    expect(state.decisions).toHaveLength(1)
+    expect(state.decisions[0]!.id).toBe('d1')
+    expect(state.decisions[0]!.trigger).toBe('tool_failure')
   })
 })

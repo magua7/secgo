@@ -90,6 +90,7 @@ REPLAN_TRIGGER_TOOL_CONSECUTIVE_FAILURES = 2   # 连续失败 N 次触发重规�
 REPLAN_TRIGGER_SAME_TOOL_REPEAT = 3            # 同一工具重复调用 N 次触发
 REPLAN_TRIGGER_NO_PROGRESS_STEPS = 15          # 连续 N 步无有效发现触发
 REPLAN_TRIGGER_MAX_FAILURES = 5                # 累计失败 N 次触发
+MAX_REPLANS = 3                                # 单个任务最多重规划次数（超过后进入收尾 fallback）
 
 
 class ReplanDetector:
@@ -121,6 +122,23 @@ class ReplanDetector:
     def record_handoff(self, step: int) -> None:
         """Agent 切换也算一次进展（重置无进展计数）。"""
         self._last_finding_step = step
+
+    def last_failed_tool(self) -> Optional[str]:
+        """最近一次失败的工具名（用于候选策略避开重复失败路径）。"""
+        for entry in reversed(self._tool_call_history):
+            if not entry.get("success"):
+                return entry.get("tool_name")
+        return None
+
+    def reset_after_replan(self) -> None:
+        """RePlan 后重置本轮触发状态，避免下一步因为旧 counter 再次无条件触发。
+
+        历史失败统计保留在 PlanState.failed_attempts（审计用），此处只清触发计数器。
+        """
+        self._consecutive_failures = 0
+        self._tool_call_history = []
+        self._total_failures = 0
+        self._last_finding_step = 0
 
     def check(self, step: int, active_agent_id: str) -> Optional[Dict[str, Any]]:
         """检查是否需要触发 RePlan。返回触发原因字典或 None。
@@ -211,6 +229,8 @@ class PlanState:
         self.detector = ReplanDetector()
         self._candidate_index = 0
         self._last_plan_update_step = 0
+        # 达到 MAX_REPLANS 后的收尾指引只注入一次，避免长尾失败步骤反复追加重复提示
+        self.exhaustion_notice_injected: bool = False
 
     def set_plan(self, plan: str, criteria: Optional[List[str]] = None) -> None:
         """设置当前执行计划。"""
@@ -323,43 +343,53 @@ class PlanState:
 
         return candidates
 
-    def select_strategy(self, candidates: List[CandidateStrategy], trigger: str) -> Tuple[CandidateStrategy, List[str]]:
+    def select_strategy(self, candidates: List[CandidateStrategy], trigger: str,
+                        active_agent_id: str = "", failed_tool: Optional[str] = None) -> Tuple[CandidateStrategy, List[str]]:
         """从候选策略中选择最佳方案。
 
-        选择逻辑（可扩展）：
-        - 工具失败 → 优先选替代工具（风险低）
-        - 重复调用 → 优先换方法
-        - 无进展 → 优先回溯（外部情报搜索次之）
-        - 累计失败过多 → 优先回退 Planner
+        选择依据与触发原因真正相关（而非无条件 candidates[0]）：
+        - 优先低风险；
+        - 避开刚刚失败的同一工具；
+        - 当前 Agent 已连续失败时倾向切换 Agent；
+        - excessive_failures 时更倾向回退 Planner；
+        - no_progress 时倾向换一个 Agent 获取信息增益。
         """
-        rejected: List[str] = []
         if not candidates:
             raise ValueError("No candidates to select from")
 
-        if trigger == "tool_failure":
-            # 优先选替代工具方案（A）
-            selected = candidates[0]
-            rejected = [f"{c.id}: {c.description}" for c in candidates[1:]]
-        elif trigger == "repeated_calls":
-            selected = candidates[0]
-            rejected = [f"{c.id}: {c.description}" for c in candidates[1:]]
-        elif trigger == "no_progress":
-            selected = candidates[0]
-            rejected = [f"{c.id}: {c.description}" for c in candidates[1:]]
-        else:
-            selected = candidates[0]
-            rejected = [f"{c.id}: {c.description}" for c in candidates[1:]]
+        def score(candidate: CandidateStrategy) -> int:
+            points = 0
+            if candidate.risk == "low":
+                points += 2
+            elif candidate.risk == "medium":
+                points += 1
+            if failed_tool and failed_tool in candidate.suggested_tools:
+                points -= 3
+            if candidate.target_agent == active_agent_id and trigger in ("tool_failure", "repeated_calls", "excessive_failures"):
+                points -= 1
+            if trigger == "excessive_failures" and candidate.target_agent == "planner":
+                points += 2
+            if trigger == "no_progress" and candidate.target_agent != active_agent_id:
+                points += 1
+            return points
 
+        # 原始下标作为稳定 tie-break：分数相同时保留候选声明顺序
+        indexed = list(enumerate(candidates))
+        ranked = sorted(indexed, key=lambda pair: (score(pair[1]), -pair[0]), reverse=True)
+        selected = candidates[ranked[0][0]]
+        rejected = [f"{c.id}: {c.description}" for c in candidates if c.id != selected.id]
         return selected, rejected
 
     def trigger_replan(self, trigger: str, trigger_detail: str, active_agent_id: str) -> DecisionRecord:
         """触发一次完整的 RePlan 流程：生成候选 → 选择 → 记录。"""
         self.replan_count += 1
+        previous_plan = self.current_plan  # 保存「原计划」，绝不在记录后再被新计划覆盖
+        failed_tool = self.detector.last_failed_tool()
         candidates = self.generate_candidates(trigger, trigger_detail, active_agent_id)
-        selected, rejected = self.select_strategy(candidates, trigger)
+        selected, rejected = self.select_strategy(candidates, trigger, active_agent_id, failed_tool)
 
         observation = (
-            f"当前计划: {self.current_plan[:100] or '无'}\n"
+            f"原计划: {previous_plan[:100] or '无'}\n"
             f"已失败尝试: {len(self.failed_attempts)} 次\n"
             f"已重规划次数: {self.replan_count - 1}"
         )
@@ -377,11 +407,14 @@ class PlanState:
         )
         self.decision_history.append(decision)
 
-        # 更新计划
+        # 更新计划：current_plan 只保存「新计划」；原计划已保留在 decision.observation
         self.current_plan = (
             f"[RePlan #{self.replan_count}] {selected.description}\n"
             f"触发: {trigger} - {trigger_detail[:80]}"
         )
+
+        # 关键：RePlan 后重置本轮触发器状态，避免下一步因为旧 counter 再次无条件触发
+        self.detector.reset_after_replan()
 
         return decision
 
@@ -394,6 +427,7 @@ class PlanState:
             "replan_count": self.replan_count,
             "decision_history": [d.to_dict() for d in self.decision_history[-20:]],
             "detector": self.detector.to_dict(),
+            "exhaustion_notice_injected": self.exhaustion_notice_injected,
         }
 
     def to_serializable(self) -> Dict[str, Any]:
@@ -405,6 +439,7 @@ class PlanState:
             "replan_count": self.replan_count,
             "decision_history": [d.to_dict() for d in self.decision_history[-20:]],
             "detector": self.detector.to_dict(),
+            "exhaustion_notice_injected": self.exhaustion_notice_injected,
         }
 
     @classmethod
@@ -414,6 +449,7 @@ class PlanState:
         state.current_plan = data.get("current_plan", "")
         state.success_criteria = list(data.get("success_criteria", []))
         state.replan_count = data.get("replan_count", 0)
+        state.exhaustion_notice_injected = bool(data.get("exhaustion_notice_injected", False))
         # 恢复 detector
         detector_data = data.get("detector", {})
         state.detector._consecutive_failures = detector_data.get("consecutive_failures", 0)

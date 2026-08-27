@@ -68,7 +68,9 @@ async def execute_web_search(query: str) -> Dict[str, Any]:
 
     results = _parse_bing_results(html_text)
     if not results:
-        return {"success": True, "output": "No search results found."}
+        # 无有效结果视为「失败」：让 RePlan 检测器把连续无结果搜索计入失败，及时触发策略调整；
+        # 同时避免 "No search results found" 被当作关键证据。
+        return {"success": False, "error": "No search results found."}
 
     formatted = "\n\n".join(
         f"{i + 1}. {r['title']}\n   {r['snippet']}\n   URL: {r['url']}"

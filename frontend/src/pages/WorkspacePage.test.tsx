@@ -45,8 +45,9 @@ describe('WorkspacePage panel interactions', () => {
     render(<ControlledWorkspace />)
     expect(screen.getByRole('button', { name: '收起执行面板' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '执行轨迹' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '证据' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '资源' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '关键证据' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '决策记录' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '资源' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '展开执行面板' })).not.toBeInTheDocument()
   })
 

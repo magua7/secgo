@@ -186,6 +186,38 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "completed")
         self.assertEqual([call.args[0] for call in tool.await_args_list], ["skill_list", "skill_read"])
 
+    async def test_replan_exhaustion_notice_is_injected_once(self):
+        """达到 MAX_REPLANS 后，收尾指引只注入一次，后续触发条件被静默吞掉。"""
+        from secgo.kernel.plan_state import MAX_REPLANS, PlanState
+
+        plan = PlanState(goal="t")
+        plan.replan_count = MAX_REPLANS
+        # 预置检测器：进入主循环第一次 check 即触发 tool_failure
+        plan.detector.record_tool_call("nmap", False, 0)
+        plan.detector.record_tool_call("nmap", False, 0)
+        initial = {
+            "activeAgentId": "planner",
+            "messages": [],
+            "stepCount": 1,
+            "planState": plan.to_serializable(),
+        }
+        tool = AsyncMock(return_value={"success": False, "error": "boom"})
+        result, _, stream, _ = await self._run([
+            _response("", [_call("nmap", {}, "f1")]),
+            _response("", [_call("nmap", {}, "f2")]),
+            _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
+        ], initial, execute_tool=tool)
+        self.assertEqual(result["reason"], "completed")
+        exhausted_events = [
+            data for event, data in self.events
+            if event == "decision:reason" and data["decision"]["trigger"] == "replan_exhausted"
+        ]
+        self.assertEqual(len(exhausted_events), 1)
+        # 注入一次后该提示常驻对话历史；任何一次 LLM 调用里都不应出现第二条
+        for call in stream.await_args_list:
+            contents = [message.get("content") for message in call.args[1] if isinstance(message.get("content"), str)]
+            self.assertEqual(sum("已达最大重规划次数" in content for content in contents), 1)
+
 
 class InputResolverTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

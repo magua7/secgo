@@ -1,17 +1,6 @@
-import type { AgentId, EvidenceItem, ExecutionStatus, TimelineItem, ToolUse } from './execution'
+import type { AgentId, DecisionRecord, EvidenceItem, ExecutionStatus, TimelineItem, ToolUse } from './execution'
 
-export type ExecutionTraceTab = 'trace' | 'evidence' | 'resources'
-
-export interface ResourceGroup {
-  name: string
-  count: number
-  type?: string
-  invocations: ToolUse[]
-}
-
-import type { DecisionRecord } from './execution'
-
-export type ExecutionTraceTab = 'trace' | 'evidence' | 'resources' | 'decisions'
+export type ExecutionTraceTab = 'trace' | 'evidence' | 'decisions'
 
 export interface ResourceGroup {
   name: string
