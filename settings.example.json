@@ -29,8 +29,9 @@
     "port": 8381
   },
   "run_limits": {
-    "max_steps": 50,
-    "max_replans": 2,
-    "max_seconds": 600
+    // 以下额度全部为「单次 Run 安全窗口」（每次 run_engine 从 0 开始，不是 Session 累计）
+    "max_steps_per_run": 50,
+    "max_replans_per_run": 2,
+    "max_tokens_per_run": 100000
   }
 }

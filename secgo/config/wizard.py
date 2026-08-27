@@ -106,7 +106,7 @@ def _write_config_files(
             "port": web_port,
         },
         "run_limits": {
-            "max_steps": 50,
+            "max_steps_per_run": 50,
         },
     }
     SETTINGS_FILE.write_text(

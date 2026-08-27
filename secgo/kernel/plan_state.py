@@ -34,6 +34,16 @@ class FailedAttempt:
             "timestamp": self.timestamp or time.time(),
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "FailedAttempt":
+        return cls(
+            step=int(data.get("step", 0)),
+            agent_id=str(data.get("agent_id", "")),
+            tool_name=str(data.get("tool_name", "")),
+            error=str(data.get("error", "")),
+            timestamp=float(data.get("timestamp", 0.0)),
+        )
+
 
 @dataclass
 class CandidateStrategy:
@@ -90,7 +100,9 @@ REPLAN_TRIGGER_TOOL_CONSECUTIVE_FAILURES = 2   # 连续失败 N 次触发重规�
 REPLAN_TRIGGER_SAME_TOOL_REPEAT = 3            # 同一工具重复调用 N 次触发
 REPLAN_TRIGGER_NO_PROGRESS_STEPS = 15          # 连续 N 步无有效发现触发
 REPLAN_TRIGGER_MAX_FAILURES = 5                # 累计失败 N 次触发
-MAX_REPLANS = 3  # 兜底默认值；运行时以 config.budget.maxReplansPerRun（settings.json run_limits.max_replans / MAX_REPLANS env）为准
+
+# failed_attempts 历史保留条数上限：只留最近 N 条（防无限增长），用于告诉 Planner「哪些路径已经失败过」
+MAX_FAILED_ATTEMPTS = 50
 
 
 class ReplanDetector:
@@ -139,6 +151,15 @@ class ReplanDetector:
         self._tool_call_history = []
         self._total_failures = 0
         self._last_finding_step = 0
+
+    def reset_for_new_run(self) -> None:
+        """新 Run 启动时清理「当前触发窗口」瞬态（与 RePlan 后重置同一语义）。
+
+        连续失败计数、工具调用历史、无进展基准都属于触发窗口，不跨 Run 保留；
+        否则上一 Run 尾部的 consecutive_failures=2 会让续跑的第一个循环瞬间再次 RePlan。
+        跨 Run 的历史知识（failed_attempts / decision_history）由 PlanState 持有，不受影响。
+        """
+        self.reset_after_replan()
 
     def check(self, step: int, active_agent_id: str) -> Optional[Dict[str, Any]]:
         """检查是否需要触发 RePlan。返回触发原因字典或 None。
@@ -211,6 +232,12 @@ class ReplanDetector:
 class PlanState:
     """任务计划状态机：记录目标、当前计划、失败历史、决策链。
 
+    RePlan 计数拆分两层（与 step 的 run/total 拆分同语义）：
+    - run_replan_count：当前这一次 run_engine 已使用多少次 RePlan（每次 Run 从 0 开始，
+      用于 maxReplansPerRun 安全额度，不因上一次 Run 耗尽而让新 Run 失去权限）；
+    - total_replan_count：整个任务/Session 历史累计发生多少次 RePlan（审计 / Timeline /
+      Benchmark 用，持久化；replan_count 属性保留为 total 的兼容别名）。
+
     用法：
         plan = PlanState(goal="渗透测试 target.com")
         plan.set_plan("1. 信息收集 2. 漏洞扫描 3. 漏洞利用")
@@ -224,13 +251,20 @@ class PlanState:
         self.current_plan: str = ""
         self.success_criteria: List[str] = []
         self.failed_attempts: List[FailedAttempt] = []
-        self.replan_count: int = 0
+        self.run_replan_count: int = 0
+        self.total_replan_count: int = 0
         self.decision_history: List[DecisionRecord] = []
         self.detector = ReplanDetector()
         self._candidate_index = 0
         self._last_plan_update_step = 0
-        # 达到 MAX_REPLANS 后的收尾指引只注入一次，避免长尾失败步骤反复追加重复提示
+        # 达到 maxReplansPerRun 后的收尾指引只注入一次，避免长尾失败步骤反复追加重复提示。
+        # 属于 Run 临时状态：每次新 Run 必须重置为 False，否则续跑后触发条件会被静默吞掉
         self.exhaustion_notice_injected: bool = False
+
+    @property
+    def replan_count(self) -> int:
+        """兼容别名：历史上只有单一计数，现语义为「累计总次数」。"""
+        return self.total_replan_count
 
     def set_plan(self, plan: str, criteria: Optional[List[str]] = None) -> None:
         """设置当前执行计划。"""
@@ -239,7 +273,7 @@ class PlanState:
             self.success_criteria = criteria
 
     def add_failure(self, agent_id: str, tool_name: str, error: str, step: int = 0) -> None:
-        """记录一次失败尝试。"""
+        """记录一次失败尝试。超过 MAX_FAILED_ATTEMPTS 时只保留最近 N 条。"""
         self.failed_attempts.append(FailedAttempt(
             step=step,
             agent_id=agent_id,
@@ -247,6 +281,18 @@ class PlanState:
             error=error,
             timestamp=time.time(),
         ))
+        if len(self.failed_attempts) > MAX_FAILED_ATTEMPTS:
+            del self.failed_attempts[:-MAX_FAILED_ATTEMPTS]
+
+    def reset_for_new_run(self) -> None:
+        """新 Run 启动：重新获得 Run 级执行额度，但不丢失任务历史。
+
+        - 重置：run_replan_count=0、exhaustion_notice_injected=False、detector 触发窗口；
+        - 保留：goal、current_plan、success_criteria、failed_attempts、decision_history。
+        """
+        self.run_replan_count = 0
+        self.exhaustion_notice_injected = False
+        self.detector.reset_for_new_run()
 
     def generate_candidates(self, trigger: str, detail: str, active_agent_id: str) -> List[CandidateStrategy]:
         """根据触发原因生成候选策略。
@@ -382,7 +428,8 @@ class PlanState:
 
     def trigger_replan(self, trigger: str, trigger_detail: str, active_agent_id: str) -> DecisionRecord:
         """触发一次完整的 RePlan 流程：生成候选 → 选择 → 记录。"""
-        self.replan_count += 1
+        self.run_replan_count += 1
+        self.total_replan_count += 1
         previous_plan = self.current_plan  # 保存「原计划」，绝不在记录后再被新计划覆盖
         failed_tool = self.detector.last_failed_tool()
         candidates = self.generate_candidates(trigger, trigger_detail, active_agent_id)
@@ -391,7 +438,7 @@ class PlanState:
         observation = (
             f"原计划: {previous_plan[:100] or '无'}\n"
             f"已失败尝试: {len(self.failed_attempts)} 次\n"
-            f"已重规划次数: {self.replan_count - 1}"
+            f"已重规划次数: {self.total_replan_count - 1}"
         )
 
         decision = DecisionRecord(
@@ -408,8 +455,9 @@ class PlanState:
         self.decision_history.append(decision)
 
         # 更新计划：current_plan 只保存「新计划」；原计划已保留在 decision.observation
+        # 编号使用累计总次数，跨 Run 连续（Run 1: #1 #2，Run 2: #3 ...）
         self.current_plan = (
-            f"[RePlan #{self.replan_count}] {selected.description}\n"
+            f"[RePlan #{self.total_replan_count}] {selected.description}\n"
             f"触发: {trigger} - {trigger_detail[:80]}"
         )
 
@@ -424,37 +472,65 @@ class PlanState:
             "current_plan": self.current_plan,
             "success_criteria": self.success_criteria,
             "failed_attempts": [f.to_dict() for f in self.failed_attempts[-10:]],
-            "replan_count": self.replan_count,
+            "replan_count": self.total_replan_count,
+            "run_replan_count": self.run_replan_count,
+            "total_replan_count": self.total_replan_count,
             "decision_history": [d.to_dict() for d in self.decision_history[-20:]],
             "detector": self.detector.to_dict(),
             "exhaustion_notice_injected": self.exhaustion_notice_injected,
         }
 
     def to_serializable(self) -> Dict[str, Any]:
-        """可序列化版本（存 session state）。"""
+        """可序列化版本（存 session state）。
+
+        持久化内容（Task State 层）：
+        - goal / current_plan / success_criteria / decision_history / total_replan_count；
+        - failed_attempts：跨 Run 保留的历史失败知识（Planner 据此避开旧路径），截断到最近 MAX 条；
+        - replan_count：total 的兼容镜像（旧版本读取字段），非 Run 级额度。
+        不持久化（Run 临时状态）：run_replan_count、exhaustion_notice_injected、detector 触发窗口。
+        """
         return {
             "goal": self.goal,
             "current_plan": self.current_plan,
             "success_criteria": list(self.success_criteria),
-            "replan_count": self.replan_count,
+            "failed_attempts": [
+                f.to_dict() for f in self.failed_attempts[-MAX_FAILED_ATTEMPTS:]
+            ],
+            "run_replan_count": 0,  # Run 级计数不落库；写 0 防御性声明语义
+            "total_replan_count": self.total_replan_count,
+            "replan_count": self.total_replan_count,  # 兼容镜像：旧读者读 total
             "decision_history": [d.to_dict() for d in self.decision_history[-20:]],
-            "detector": self.detector.to_dict(),
-            "exhaustion_notice_injected": self.exhaustion_notice_injected,
+            "exhaustion_notice_injected": False,  # Run 临时状态，新 Run 一律重新允许
         }
 
     @classmethod
     def from_serializable(cls, data: Dict[str, Any]) -> PlanState:
-        """从 session state 恢复 PlanState。"""
+        """从 session state 恢复 PlanState。
+
+        - total_replan_count / failed_attempts / decision_history / plan 恢复为 Task State；
+        - run_replan_count 恒从 0 开始（旧数据中的 replan_count 亦视为累计值兜底）；
+        - exhaustion_notice_injected 恒为 False（Run 临时状态，绝不跨 Run 继承）；
+        - detector 触发窗口（连续失败等瞬态）不再恢复——新 Run 从干净窗口开始，
+          避免「继续」后的第一个循环因上一 Run 尾部状态瞬间误触发 RePlan。
+        """
         state = cls(goal=data.get("goal", ""))
         state.current_plan = data.get("current_plan", "")
         state.success_criteria = list(data.get("success_criteria", []))
-        state.replan_count = data.get("replan_count", 0)
-        state.exhaustion_notice_injected = bool(data.get("exhaustion_notice_injected", False))
-        # 恢复 detector
-        detector_data = data.get("detector", {})
-        state.detector._consecutive_failures = detector_data.get("consecutive_failures", 0)
-        state.detector._total_failures = detector_data.get("total_failures", 0)
-        state.detector._last_finding_step = detector_data.get("last_finding_step", 0)
+        state.total_replan_count = int(
+            data.get("total_replan_count", data.get("replan_count", 0)) or 0
+        )
+        state.run_replan_count = 0
+        state.exhaustion_notice_injected = False
+        # 恢复失败尝试历史（跨 Run 保留的「历史知识」；上限内取最新）
+        restored_failures = []
+        for f in data.get("failed_attempts") or []:
+            if isinstance(f, dict):
+                try:
+                    restored_failures.append(FailedAttempt.from_dict(f))
+                except Exception:
+                    continue
+        state.failed_attempts = restored_failures[-MAX_FAILED_ATTEMPTS:]
+        # detector 保持全新实例：瞬态触发窗口不跨 Run 继承
         # 恢复决策历史（只保留摘要，不保留完整对象）
         for d in data.get("decision_history", []):
             state.decision_history.append(DecisionRecord(

@@ -144,16 +144,68 @@ class ReplanLoopSafetyTests(unittest.TestCase):
         self.assertIn("[RePlan #1]", plan.current_plan)
         self.assertNotEqual(plan.current_plan, "原计划：扫描 80 端口")
 
-    def test_replan_count_guards_max(self):
-        from secgo.kernel.plan_state import MAX_REPLANS
-        self.assertGreater(MAX_REPLANS, 0)
-
-    def test_exhaustion_notice_flag_roundtrip(self):
+    def test_exhaustion_notice_is_run_scoped_not_persisted(self):
+        """exhaustion_notice 是 Run 临时状态：序列化后重新加载必须重置为 False。"""
         plan = PlanState(goal="t")
         self.assertFalse(plan.exhaustion_notice_injected)
         plan.exhaustion_notice_injected = True
         restored = PlanState.from_serializable(plan.to_serializable())
-        self.assertTrue(restored.exhaustion_notice_injected)
+        # 序列化输出不携带 True（Run 临时状态不落库），恢复恒为 False
+        self.assertFalse(plan.to_serializable()["exhaustion_notice_injected"])
+        self.assertFalse(restored.exhaustion_notice_injected)
+
+    def test_from_serializable_resets_run_replan_count_and_detector_window(self):
+        """新 Run：run_replan_count 恒 0，detector 触发窗口不跨 Run 继承。"""
+        plan = PlanState(goal="t")
+        plan.trigger_replan("tool_failure", "x", "op")
+        plan.trigger_replan("tool_failure", "y", "op")
+        plan.detector.record_tool_call("nmap", False, 1)
+        plan.detector.record_tool_call("nmap", False, 2)
+        plan.exhaustion_notice_injected = True
+        data = plan.to_serializable()
+        restored = PlanState.from_serializable(data)
+        self.assertEqual(restored.total_replan_count, 2)
+        self.assertEqual(restored.run_replan_count, 0)
+        self.assertFalse(restored.exhaustion_notice_injected)
+        self.assertIsNone(restored.detector.check(1, "op"))  # 旧连续失败窗口已被清空
+
+    def test_reset_for_new_run_preserves_history(self):
+        """reset_for_new_run 只清 Run 额度/瞬态，历史计划与失败记录必须保留。"""
+        plan = PlanState(goal="t")
+        plan.set_plan("保留的计划")
+        plan.add_failure("op", "nmap", "err", step=1)
+        plan.trigger_replan("tool_failure", "x", "op")
+        plan.exhaustion_notice_injected = True
+        plan.reset_for_new_run()
+        self.assertEqual(plan.run_replan_count, 0)
+        self.assertEqual(plan.total_replan_count, 1)
+        self.assertFalse(plan.exhaustion_notice_injected)
+        self.assertTrue(plan.current_plan.startswith("[RePlan #1]"))
+        self.assertEqual(len(plan.failed_attempts), 1)
+        self.assertEqual(len(plan.decision_history), 1)
+
+    def test_failed_attempts_roundtrip_persists(self):
+        plan = PlanState(goal="t")
+        plan.add_failure("operator", "port_scan", "refused", step=1)
+        plan.add_failure("research", "web_search", "no result", step=2)
+        restored = PlanState.from_serializable(plan.to_serializable())
+        self.assertEqual(len(restored.failed_attempts), 2)
+        self.assertEqual(restored.failed_attempts[0].tool_name, "port_scan")
+        self.assertEqual(restored.failed_attempts[1].agent_id, "research")
+        self.assertEqual(restored.failed_attempts[1].error, "no result")
+
+    def test_failed_attempts_are_capped(self):
+        from secgo.kernel.plan_state import MAX_FAILED_ATTEMPTS
+        plan = PlanState(goal="t")
+        for i in range(MAX_FAILED_ATTEMPTS + 20):
+            plan.add_failure("op", f"tool-{i}", "err", step=i)
+        self.assertEqual(len(plan.failed_attempts), MAX_FAILED_ATTEMPTS)
+        # 只保留最近 N 条：最早的那条 tool-0 已被淘汰，最新的是 tool-N+19
+        self.assertEqual(plan.failed_attempts[0].tool_name, "tool-20")
+        self.assertEqual(plan.failed_attempts[-1].tool_name, f"tool-{MAX_FAILED_ATTEMPTS + 19}")
+        # 序列化同样受上限约束
+        restored = PlanState.from_serializable(plan.to_serializable())
+        self.assertEqual(len(restored.failed_attempts), MAX_FAILED_ATTEMPTS)
 
 
 class StrategySelectionTests(unittest.TestCase):

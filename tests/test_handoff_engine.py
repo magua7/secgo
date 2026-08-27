@@ -53,7 +53,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         handoff_engine._input_resolvers.clear()
         self.events = []
         self.config = SimpleNamespace(
-            budget=SimpleNamespace(maxTokensPerSession=100_000, maxStepsPerTask=20, maxReplansPerRun=3),
+            budget=SimpleNamespace(maxTokensPerRun=100_000, maxStepsPerRun=20, maxReplansPerRun=3),
             llm=SimpleNamespace(subscriptions={"coding": SimpleNamespace()}, agents={}),
             context=SimpleNamespace(toolOutputMaxTokens=2000),
         )
@@ -188,26 +188,16 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replan_exhaustion_notice_is_injected_once(self):
         """达到 max_replans 后，收尾指引只注入一次，后续触发条件被静默吞掉。"""
-        from secgo.kernel.plan_state import MAX_REPLANS, PlanState
-
-        self.config.budget.maxReplansPerRun = MAX_REPLANS
-        plan = PlanState(goal="t")
-        plan.replan_count = MAX_REPLANS
-        # 预置检测器：进入主循环第一次 check 即触发 tool_failure
-        plan.detector.record_tool_call("nmap", False, 0)
-        plan.detector.record_tool_call("nmap", False, 0)
-        initial = {
-            "activeAgentId": "planner",
-            "messages": [],
-            "stepCount": 1,
-            "planState": plan.to_serializable(),
-        }
-        tool = AsyncMock(return_value={"success": False, "error": "boom"})
-        result, _, stream, _ = await self._run([
-            _response("", [_call("nmap", {}, "f1")]),
-            _response("", [_call("nmap", {}, "f2")]),
+        self.config.budget.maxReplansPerRun = 3
+        self.config.budget.maxStepsPerRun = 20
+        # 每个响应都调用失败工具：连续失败驱动 RePlan，直至本 Run 额度耗尽
+        failing_tool = AsyncMock(return_value={"success": False, "error": "boom"})
+        responses = [
+            _response("", [_call("nmap", {}, f"f{i}")]) for i in range(9)
+        ] + [
             _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
-        ], initial, execute_tool=tool)
+        ]
+        result, _, stream, _ = await self._run(responses, execute_tool=failing_tool)
         self.assertEqual(result["reason"], "completed")
         exhausted_events = [
             data for event, data in self.events
@@ -215,13 +205,17 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(exhausted_events), 1)
         # 注入一次后该提示常驻对话历史；任何一次 LLM 调用里都不应出现第二条
+        notice_counts = []
         for call in stream.await_args_list:
             contents = [message.get("content") for message in call.args[1] if isinstance(message.get("content"), str)]
-            self.assertEqual(sum("已达最大重规划次数" in content for content in contents), 1)
+            notice_counts.append(sum("已达最大重规划次数" in content for content in contents))
+        # 注入只发生一次（后续调用中该提示常驻，但绝无重复注入）
+        self.assertTrue(any(count == 1 for count in notice_counts))
+        self.assertTrue(all(count <= 1 for count in notice_counts))
 
     async def test_max_steps_continuation_renews_run_budget(self):
         """max_steps 是 Run 级额度：同 Session「继续」后重新获得步数额度，且不丢失上下文。"""
-        self.config.budget.maxStepsPerTask = 3
+        self.config.budget.maxStepsPerRun = 3
         manager = _MemorySessionManager(None)
         tool = AsyncMock(return_value={"success": True, "output": "ok"})
         # 每个响应都调用业务工具，使循环持续消耗步数（不完成、不挂起输入）

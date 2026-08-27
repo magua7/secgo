@@ -75,10 +75,16 @@ class McpConfig:
 
 @dataclass(frozen=False)
 class BudgetConfig:
-    maxTokensPerSession: int
-    maxStepsPerTask: int
-    stepTimeoutMs: int
+    """执行预算（Run 安全窗口语义）。
+
+    所有安全额度属于一次 run_engine 执行窗口（Run）：
+    - maxStepsPerRun / maxReplansPerRun / maxTokensPerRun 每次 Run 从 0 开始；
+    - Session 累计步数 / 累计 token 只作为审计数据持久化，不用于限制单次 Run。
+    命名必须与真实语义一致：字段是 PerRun，实现就必须 per-run 重置。
+    """
+    maxStepsPerRun: int
     maxReplansPerRun: int
+    maxTokensPerRun: int
 
 
 @dataclass(frozen=False)
@@ -182,7 +188,7 @@ DEFAULT_CONFIG = AppConfig(
         agents={},
     ),
     mcp=McpConfig(servers=[], timeout=15_000),
-    budget=BudgetConfig(maxTokensPerSession=100_000, maxStepsPerTask=50, stepTimeoutMs=30_000, maxReplansPerRun=3),
+    budget=BudgetConfig(maxStepsPerRun=50, maxReplansPerRun=3, maxTokensPerRun=100_000),
     context=ContextConfig(
         contextWindow=32768,
         summaryThreshold=0.7,
@@ -248,16 +254,10 @@ DEFAULT_CONFIG = AppConfig(
 
 # ── 文件读取辅助 ──────────────────────────────────────────
 
-# 旧版环境变量前缀（拆拼写法，避免品牌残留，仅作兼容读取）
-LEGACY_ENV_PREFIX = "TIAN" + "GONG_"
-
 
 def _env_var(key: str) -> Optional[str]:
-    """环境变量读取：新名 SECGO_* 优先，旧名兼容读取。"""
-    val = os.environ.get(f"SECGO_{key}")
-    if val is not None and val != "":
-        return val
-    return os.environ.get(f"{LEGACY_ENV_PREFIX}{key}")
+    """环境变量读取：统一使用 SECGO_* 前缀。"""
+    return os.environ.get(f"SECGO_{key}")
 
 
 def _read_jsonc_file(file_path: Path) -> Any:
@@ -491,15 +491,20 @@ def load_config() -> AppConfig:
             break
     context_window = _env_int("CONTEXT_WINDOW", context_window)
 
-    # run_limits（settings.json，zhiyugo 风格）：max_steps 映射为单次 Run 的最大步数（不是 Session 累计）
+    # run_limits（settings.json）：以下额度全部是「单次 Run」安全窗口
+    # （每次 run_engine 从 0 开始，不是 Session 累计；Session 累计仅作审计持久化）
     run_limits = settings.get("run_limits") or {}
     max_steps = _env_int(
-        "MAX_STEPS",
-        int(run_limits.get("max_steps") or DEFAULT_CONFIG.budget.maxStepsPerTask),
+        "MAX_STEPS_PER_RUN",
+        int(run_limits.get("max_steps_per_run") or DEFAULT_CONFIG.budget.maxStepsPerRun),
     )
     max_replans = _env_int(
-        "MAX_REPLANS",
-        int(run_limits.get("max_replans") or DEFAULT_CONFIG.budget.maxReplansPerRun),
+        "MAX_REPLANS_PER_RUN",
+        int(run_limits.get("max_replans_per_run") or DEFAULT_CONFIG.budget.maxReplansPerRun),
+    )
+    max_tokens_per_run = _env_int(
+        "MAX_TOKENS_PER_RUN",
+        int(run_limits.get("max_tokens_per_run") or DEFAULT_CONFIG.budget.maxTokensPerRun),
     )
 
     llm_cfg = LlmConfig(
@@ -524,12 +529,9 @@ def load_config() -> AppConfig:
         llm=llm_cfg,
         mcp=McpConfig(servers=servers, timeout=timeout),
         budget=BudgetConfig(
-            maxTokensPerSession=_env_int(
-                "MAX_TOKENS_SESSION", DEFAULT_CONFIG.budget.maxTokensPerSession
-            ),
-            maxStepsPerTask=max_steps,
-            stepTimeoutMs=_env_int("STEP_TIMEOUT_MS", DEFAULT_CONFIG.budget.stepTimeoutMs),
+            maxStepsPerRun=max_steps,
             maxReplansPerRun=max_replans,
+            maxTokensPerRun=max_tokens_per_run,
         ),
         context=ContextConfig(
             contextWindow=context_window,

@@ -94,7 +94,7 @@ python -m secgo.headless "任务"   # Headless（JSON Lines 输出，保留模�
     "timeout_seconds": 60
   },
   "run_limits": {
-    "max_steps": 50
+    "max_steps_per_run": 50
   }
 }
 ```
@@ -131,7 +131,10 @@ python -m secgo.headless "任务"   # Headless（JSON Lines 输出，保留模�
   - `llm` — 默认模型（provider/base_url/api_key/model，zhiyugo 风格）
   - `subscriptions` / `agents` — 多订阅与四 Agent 精细模型绑定（覆盖 `config/LLMconfig.jsonc` 同名项）
   - `web` — Web 访问认证与端口：登录校验、`secret_key`（Cookie 签名）、`port`
-  - `run_limits` — 运行限额（max_steps / max_replans / max_seconds）
+  - `run_limits` — 运行限额（全部为「单次 Run 安全窗口」，每次 `run_engine` 从 0 开始，不是 Session 累计）：
+    - `max_steps_per_run` — 单次 Run 最大步数（续跑后重新获得额度）
+    - `max_replans_per_run` — 单次 Run 最大重规划次数（续跑后重新获得额度）
+    - `max_tokens_per_run` — 单次 Run 估算 token 上限
 - `config/LLMconfig.jsonc` — 可选的多订阅与四 Agent 精细模型绑定（遗留兼容，settings.json 优先）
 - `config/mcp.jsonc` — MCP 服务器列表，例如：
 
@@ -150,17 +153,45 @@ python -m secgo.headless "任务"   # Headless（JSON Lines 输出，保留模�
 Web 端模型配置（API Key）通过「⚙ 设置」页写入 `settings.json` 的
 `llm` / `subscriptions` / `agents` 节；退出登录不删除配置。赛事演示环境的访问凭据由项目方随交付材料单独提供。
 
-环境变量（`SECGO_*` 新名优先，旧版框架环境变量名兼容读取；`.env` 文件不再加载）：
+环境变量（统一使用 `SECGO_*` 前缀；`.env` 文件不再加载）：
 
 | 变量 | 说明 |
 | ---- | ---- |
 | `SECGO_DEFAULT_MODEL` | 默认模型 ID |
-| `SECGO_MAX_TOKENS_SESSION` | 会话级 token 上限 |
-| `SECGO_MAX_STEPS` | 单任务最大步数 |
+| `SECGO_MAX_STEPS_PER_RUN` | 单次 Run 最大步数（续跑后重新获得额度） |
+| `SECGO_MAX_REPLANS_PER_RUN` | 单次 Run 最大重规划次数（续跑后重新获得额度） |
+| `SECGO_MAX_TOKENS_PER_RUN` | 单次 Run 估算 token 上限 |
 | `SECGO_WORKSPACE_DIR` | 工作区目录 |
 | `SECGO_SKILLS_DIR` | 技能库根目录（默认项目 `skill/`） |
 | `SECGO_WEB_PORT` | Web 端口（启动脚本默认 8381；可通过环境变量覆盖） |
 | `SECGO_ALLOWED_COMMANDS` / `SECGO_BLOCKED_COMMANDS` | 命令白名单/黑名单（逗号分隔） |
+
+## 执行预算与续跑状态模型
+
+四层状态语义（统一后）：
+
+- **Session**：整个多轮会话，保存 conversation messages、历史 Turn、累计统计（`stepCount` /
+  `tokenCount` / 累计 RePlan 次数）与当前未完成任务状态。累计统计是审计数据，不用于限制单次 Run。
+- **Turn**：一次用户输入产生的一轮交互记录，对应一条 `conversation_turns` 行与独立的
+  execution snapshot（timeline / evidence / decisions / report），用于历史展示，不是执行预算。
+- **Run**：一次 `run_engine(...)` 启动的执行窗口。**所有安全额度属于 Run**，
+  每次 Run 从 0 开始重新获得：`run_step_count` / `run_replan_count` / `run_token_count`。
+- **Task State**：当前安全任务做到哪里（`goal` / `current_plan` / `todo` / `activeAgent` /
+  `failed_attempts` / `decision_history`）。因达到 Run 步数上限 / RePlan 上限 / 等待用户 /
+  人工暂停而未完成时，Task State 必须跨 Run 保留。
+
+三类预算归属：
+
+- **Step 预算**：`run_step_count` ≤ `max_steps_per_run`（Run 级）。
+- **RePlan 预算**：`run_replan_count` ≤ `max_replans_per_run`（Run 级）；`total_replan_count` 仅作累计审计。
+- **Token 预算**：`run_token_count` ≤ `max_tokens_per_run`（Run 级）；Session 累计 token 仅作审计。
+
+续跑语义（「继续」= 新 Turn + 新 Run Budget + 保留未完成 Task State，绝不重新开始整道题）：
+步数 / RePlan 额度耗尽 → checkpoint 落库 → 用户继续 → 新 Turn → 新 Run → 重新获得
+Run 额度 → 恢复 Task State → 继续原计划。`failed_attempts`（最近 50 条）与 `decision_history`
+跨 Run 保留；`exhaustion_notice` 与 detector 触发窗口（连续失败计数等）为 Run 临时状态，
+新 Run 一律重置。任务 `task_complete` 后，用户的新输入视为新任务：保留 conversation messages，
+重置 PlanState / TODO / detector / run counters，避免旧任务污染新任务。
 
 ## 项目结构
 

@@ -1,4 +1,9 @@
-"""Token 预算管理：估算 + 会话级额度控制。"""
+"""Token 预算管理：估算 + Run 级额度控制。
+
+BudgetManager 生命周期 = 一次 run_engine 执行窗口（Run）：实例在每次 run_engine
+内创建，用量不跨 Run 累积；Session/任务累计 token 属于审计数据，由引擎持久化，
+不在此处做硬限制。字段命名（maxTokensPerRun）必须与该真实语义一致。
+"""
 
 import json
 import math
@@ -40,8 +45,12 @@ class BudgetManager:
         self._usage: Dict[str, int] = {}
 
     def check_budget(self, session_id: str) -> Dict[str, Any]:
-        usage = self._usage.get(session_id, 0)
+        usage = self.get_usage(session_id)
         return {"allowed": usage < self.max_tokens, "usage": usage}
 
     def add_usage(self, session_id: str, tokens: int) -> None:
-        self._usage[session_id] = self._usage.get(session_id, 0) + tokens
+        self._usage[session_id] = self.get_usage(session_id) + tokens
+
+    def get_usage(self, session_id: str) -> int:
+        """本次 Run 已消耗的估算 token 数（run_token_count 审计口径）。"""
+        return self._usage.get(session_id, 0)
