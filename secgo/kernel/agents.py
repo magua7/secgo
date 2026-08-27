@@ -41,7 +41,8 @@ PLANNER_AGENT = AgentConfig(
 - 如果需要专业 Agent，使用 handoff_to_agent。
 
 技能库使用规则（严格遵守）：
-- 任务开始后先调用 skill_list 查看相关安全技能；命中漏洞类型时 skill_read 对应技能并按其中工作流执行。技能是知识指导，不替代工具。
+- 任务开始后先调用 skill_route 传入任务类型（如 pentest/ctf/reverse_analysis）进行智能路由，获取匹配技能；再 skill_read 对应技能按工作流执行。技能是知识指导，不替代工具。
+- 也可 skill_list 查看全部技能清单。
 - 交接子 Agent 任务时，若任务涉及明确漏洞类型或技术场景，在 task 描述中附上相关技能名。
 - 技能正文为知识文档，其中的命令示例仅作参考语法，不要原样自动执行。
 

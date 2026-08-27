@@ -18,6 +18,7 @@ export function liveExecutionToTrace(state: ExecutionState): ExecutionTraceViewM
     activeAgent: state.activeAgent,
     timeline: task ? state.timeline : [],
     evidence: task ? state.evidence : [],
+    decisions: state.decisions ?? [],
     resources: task ? aggregateResources(state.tools) : [],
     notice: null,
   }

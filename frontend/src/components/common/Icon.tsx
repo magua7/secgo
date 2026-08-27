@@ -26,6 +26,7 @@ const paths: Record<string, React.ReactNode> = {
   taskAnalysis: <><path d="M4 2h9l5 5v15H4zM13 2v5h5M7 10h7M7 14h4"/><circle cx="14.5" cy="16.5" r="3.5"/><path d="M17 19l3 3"/></>,
   agentCollaboration: <><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="7" cy="17" r="2.5"/><circle cx="17" cy="17" r="2.5"/><path d="M9.5 7h5M7 9.5v5M17 9.5v5M9.5 17h5M8.8 8.8l6.4 6.4M15.2 8.8l-6.4 6.4"/></>,
   evidenceReport: <><path d="M4 2h9l5 5v15H4zM13 2v5h5M7 10h7M7 14h4"/><path d="M16 11.5l4 1.5v3c0 2.2-1.5 3.9-4 5-2.5-1.1-4-2.8-4-5v-3z"/><path d="M14.2 16l1.2 1.2 2.5-2.6"/></>,
+  tool: <><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.8-3.8a1 1 0 000-1.4l-1.6-1.6a1 1 0 00-1.4 0L14.7 6.3z"/><path d="M4 20l5.5-5.5"/><path d="M15 4l5 5"/><path d="M4 20l3.5-3.5"/><circle cx="8" cy="8" r="3"/></>,
 }
 
 export function Icon({ name, ...props }: SVGProps<SVGSVGElement> & { name: string }) {

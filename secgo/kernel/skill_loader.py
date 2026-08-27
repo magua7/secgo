@@ -11,7 +11,7 @@
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -160,6 +160,9 @@ class SkillMeta:
     description: str
     enabled: bool
     group: str
+    task_types: List[str] = field(default_factory=list)
+    role: str = ""
+    risk_class: str = ""
 
 
 class SkillLibrary:
@@ -228,6 +231,9 @@ class SkillLibrary:
                 description=description,
                 enabled=bool(policy_info.get("enabled", True)),
                 group=str(policy_info.get("group", "ungrouped")),
+                task_types=list(policy_info.get("task_types") or []),
+                role=str(policy_info.get("role", "")),
+                risk_class=str(policy_info.get("risk_class", "")),
             )
             count += 1
 
@@ -266,6 +272,61 @@ class SkillLibrary:
             self._truncated += 1
             return body[:READ_TRUNCATE] + f"\n\n[... 内容过长，已截断至 {READ_TRUNCATE} 字符 ...]"
         return body
+
+    def get_meta(self, name: str) -> Optional[SkillMeta]:
+        self._load()
+        return self._meta.get(name)
+
+    def route_skills(self, task_types: List[str], role: Optional[str] = None,
+                     risk_class: Optional[str] = None, limit: int = SEARCH_LIMIT) -> List[Dict[str, Any]]:
+        """基于任务类型/角色/风险等级的安全策略感知技能路由。
+
+        优先匹配 task_types，再按 role 过滤，再按 risk_class 过滤。
+        返回按匹配度排序的技能列表。
+        """
+        self._load()
+        task_type_set = {t.lower() for t in (task_types or [])}
+        role_filter = role.lower() if role else None
+        risk_filter = risk_class.lower() if risk_class else None
+
+        scored: List[tuple] = []
+        for name, meta in self._meta.items():
+            if not meta.enabled:
+                continue
+            score = 0
+            meta_types = {t.lower() for t in meta.task_types}
+            # 任务类型匹配度（最高权重）
+            if not task_type_set:
+                score += 1  # 未指定任务类型时全部候选
+            else:
+                if task_type_set & meta_types:
+                    score += 10
+                elif not meta_types:
+                    score += 1  # 未标注类型的技能作为兜底
+            # 角色匹配
+            if role_filter:
+                if meta.role.lower() == role_filter:
+                    score += 5
+                elif meta.role == "router" and role_filter == "orchestrator":
+                    score += 3  # router 可被 orchestrator 使用
+            # 风险等级匹配
+            if risk_filter:
+                if meta.risk_class.lower() == risk_filter:
+                    score += 3
+                elif meta.risk_class == "lab_only" and risk_filter == "active":
+                    score += 1
+            if score > 0:
+                scored.append((score, name, {
+                    "name": meta.name,
+                    "description": meta.description,
+                    "enabled": meta.enabled,
+                    "group": meta.group,
+                    "task_types": list(meta.task_types),
+                    "role": meta.role,
+                    "risk_class": meta.risk_class,
+                }))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [item[2] for item in scored[:limit]]
 
     def search_skills(self, keyword: str, limit: int = SEARCH_LIMIT) -> List[Dict[str, Any]]:
         self._load()
@@ -325,6 +386,11 @@ def read_skill(name: str) -> Optional[str]:
 
 def search_skills(keyword: str, limit: int = SEARCH_LIMIT) -> List[Dict[str, Any]]:
     return skill_library.search_skills(keyword, limit)
+
+
+def route_skills(task_types: List[str], role: Optional[str] = None,
+                 risk_class: Optional[str] = None, limit: int = SEARCH_LIMIT) -> List[Dict[str, Any]]:
+    return skill_library.route_skills(task_types, role, risk_class, limit)
 
 
 def skill_exists(name: str) -> bool:

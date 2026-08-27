@@ -6,11 +6,13 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from ..config.config import PROJECT_ROOT
 from .workspace import get_workspace_base
@@ -24,6 +26,9 @@ MAX_TASK_ATTACHMENT_BYTES = 20 * 1024 * 1024
 TEMP_ATTACHMENT_TTL_SECONDS = 2 * 60 * 60
 TEXT_READ_LIMIT = 256 * 1024
 TEXT_PROMPT_LIMIT = 16 * 1024
+ZIP_MAX_SIZE = 100 * 1024 * 1024  # 100MB 解压上限
+ZIP_MAX_FILES = 200               # 最多 200 个文件
+ZIP_MAX_SINGLE_FILE = 20 * 1024 * 1024  # 单个文件最大 20MB
 
 
 @dataclass
@@ -86,6 +91,207 @@ def _atomic_write_metadata(path: Path, metadata: AttachmentMetadata) -> None:
     _atomic_write(path, serialized)
 
 
+def _try_extract_pdf_text(path: Path) -> Optional[str]:
+    """尝试用 PyMuPDF 提取 PDF 文本，失败则回退到 pdfminer 或 None。"""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(str(path))
+        parts = []
+        for page in doc:
+            text = page.get_text()
+            if text:
+                parts.append(text)
+            if sum(len(p) for p in parts) > TEXT_PROMPT_LIMIT:
+                parts.append("\n[PDF 内容过长，已截断]")
+                break
+        doc.close()
+        if parts:
+            result = "\n".join(parts)
+            if len(result) > TEXT_PROMPT_LIMIT:
+                result = result[:TEXT_PROMPT_LIMIT] + "\n\n[PDF 文本已截断]"
+            return result
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # 回退：pdfminer.six
+    try:
+        from pdfminer.high_level import extract_text
+        text = extract_text(str(path))
+        if text and text.strip():
+            if len(text) > TEXT_PROMPT_LIMIT:
+                text = text[:TEXT_PROMPT_LIMIT] + "\n\n[PDF 文本已截断]"
+            return text
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    return None
+
+
+def _try_extract_zip_content(path: Path) -> Optional[Dict[str, Any]]:
+    """安全解压 ZIP 并枚举文件内容（防 Zip Slip + 解压炸弹）。"""
+    try:
+        result: Dict[str, Any] = {
+            "type": "zip_archive",
+            "file_count": 0,
+            "total_size": 0,
+            "files": [],
+            "text_files": [],
+        }
+        total_size = 0
+        with zipfile.ZipFile(path, 'r') as zf:
+            names = zf.namelist()
+            if len(names) > ZIP_MAX_FILES:
+                result["truncated"] = True
+                names = names[:ZIP_MAX_FILES]
+
+            for name in names:
+                info = zf.getinfo(name)
+                # Zip Slip 防护
+                resolved = Path("/") / name
+                if ".." in name or resolved.resolve().name != Path(name).name:
+                    continue
+                if info.file_size > ZIP_MAX_SINGLE_FILE:
+                    result["files"].append({"name": name, "size": info.file_size, "skipped": "too_large"})
+                    continue
+                total_size += info.file_size
+                if total_size > ZIP_MAX_SIZE:
+                    result["truncated"] = True
+                    break
+
+                entry = {"name": name, "size": info.file_size, "is_dir": info.is_dir()}
+                if not info.is_dir():
+                    try:
+                        data = zf.read(name)
+                        # 尝试文本提取
+                        text = _decode_text(data[:TEXT_READ_LIMIT])
+                        if text and _looks_like_text(data[:TEXT_READ_LIMIT]):
+                            entry["text_preview"] = text[:2000]
+                            result["text_files"].append({"name": name, "preview": text[:2000]})
+                        # 递归检测嵌套 zip
+                        if data[:4] == b"PK\x03\x04":
+                            entry["nested_zip"] = True
+                    except Exception:
+                        entry["read_error"] = True
+                result["files"].append(entry)
+
+        result["file_count"] = len(result["files"])
+        result["total_size"] = total_size
+        return result
+    except zipfile.BadZipFile:
+        return {"type": "zip_archive", "error": "Bad ZIP file"}
+    except Exception as e:
+        return {"type": "zip_archive", "error": str(e)[:200]}
+
+
+def _try_parse_structured_text(text: str) -> Optional[Dict[str, Any]]:
+    """尝试解析 JSON/YAML/OpenAPI 结构化文本。"""
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    # JSON 检测
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+            result: Dict[str, Any] = {"type": "json", "parsed": True}
+            # 检测 OpenAPI/Swagger
+            if isinstance(parsed, dict):
+                if parsed.get("openapi") or parsed.get("swagger"):
+                    result["type"] = "openapi"
+                    result["openapi_version"] = parsed.get("openapi") or parsed.get("swagger", "")
+                    result["endpoints"] = _extract_openapi_endpoints(parsed)
+                    result["title"] = parsed.get("info", {}).get("title", "")
+                else:
+                    # 结构化摘要
+                    result["summary"] = _structured_json_summary(parsed)
+            return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # YAML 检测（有 yaml 库就用，没有就 fallback 到简单检测）
+    try:
+        import yaml
+        if any(c in stripped[:200] for c in [": ", ":", "\n"]):
+            parsed = yaml.safe_load(stripped)
+            if isinstance(parsed, dict):
+                result = {"type": "yaml", "parsed": True}
+                if parsed.get("openapi") or parsed.get("swagger"):
+                    result["type"] = "openapi"
+                    result["openapi_version"] = parsed.get("openapi") or parsed.get("swagger", "")
+                    result["endpoints"] = _extract_openapi_endpoints(parsed)
+                    result["title"] = parsed.get("info", {}).get("title", "")
+                else:
+                    result["summary"] = _structured_json_summary(parsed)
+                return result
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    return None
+
+
+def _extract_openapi_endpoints(spec: Dict[str, Any]) -> List[Dict[str, str]]:
+    """从 OpenAPI/Swagger 规范中提取 endpoints 摘要。"""
+    endpoints = []
+    paths = spec.get("paths", {})
+    if not isinstance(paths, dict):
+        return endpoints
+    for path, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
+        for method, detail in methods.items():
+            if method.upper() not in ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
+                continue
+            info = detail or {}
+            params = []
+            for param in (info.get("parameters") or []):
+                if isinstance(param, dict):
+                    params.append(f"{param.get('name', '?')} ({param.get('in', '?')})")
+            security = "yes" if info.get("security") else ("yes" if spec.get("security") else "no")
+            endpoints.append({
+                "path": path,
+                "method": method.upper(),
+                "summary": (info.get("summary") or info.get("description") or "")[:100],
+                "params": ", ".join(params[:5]) or "none",
+                "auth": security,
+            })
+    return endpoints
+
+
+def _structured_json_summary(data: Any, max_depth: int = 3, _depth: int = 0) -> str:
+    """生成结构化 JSON/YAML 的摘要（字段名 + 类型 + 示例值）。"""
+    if _depth >= max_depth:
+        return "..."
+    if isinstance(data, dict):
+        parts = []
+        for k, v in list(data.items())[:15]:
+            if isinstance(v, dict):
+                parts.append(f"{k}: ({_structured_json_summary(v, max_depth, _depth + 1)})")
+            elif isinstance(v, list):
+                lens = f"[{len(v)} items]"
+                if v and _depth < max_depth - 1:
+                    lens += " e.g. " + _structured_json_summary(v[0], max_depth, _depth + 1)
+                parts.append(f"{k}: {lens}")
+            elif isinstance(v, str):
+                parts.append(f"{k}: '{v[:60]}'")
+            else:
+                parts.append(f"{k}: {v}")
+        if len(data) > 15:
+            parts.append(f"... and {len(data) - 15} more fields")
+        return "{" + ", ".join(parts) + "}"
+    elif isinstance(data, list):
+        if not data:
+            return "[]"
+        return f"[{_structured_json_summary(data[0], max_depth, _depth + 1)}]"
+    else:
+        return str(data)[:80]
+
+
 def classify_basic_file(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image"
@@ -97,6 +303,8 @@ def classify_basic_file(data: bytes) -> str:
         return "image"
     if data.startswith(b"%PDF-"):
         return "pdf"
+    if len(data) >= 4 and data[:2] == b"PK" and data[2:4] in (b"\x03\x04", b"\x05\x06", b"\x07\x08"):
+        return "zip"
     if data.startswith(b"SQLite format 3\x00"):
         return "sqlite"
     if data.startswith((b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4", b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d", b"\x0a\x0d\x0d\x0a")):
@@ -135,7 +343,40 @@ def _looks_like_text(data: bytes) -> bool:
     return controls / max(len(text), 1) <= 0.02
 
 
-def extract_limited_text(path: Path) -> Optional[str]:
+def extract_limited_text(path: Path, detected_kind: str = "text") -> Optional[str]:
+    """根据文件类型提取文本内容。支持 PDF/ZIP/JSON/YAML/OpenAPI/纯文本。"""
+    # PDF 专用解析
+    if detected_kind == "pdf":
+        return _try_extract_pdf_text(path)
+
+    # ZIP 专用解析
+    if detected_kind == "zip":
+        zip_content = _try_extract_zip_content(path)
+        if zip_content:
+            # 格式化输出
+            lines = [f"[ZIP 存档] 共 {zip_content.get('file_count', 0)} 个文件"]
+            if zip_content.get("total_size"):
+                lines.append(f"总大小: {zip_content['total_size'] / 1024:.1f} KB")
+            for f in zip_content.get("files", []):
+                if f.get("is_dir"):
+                    lines.append(f"  📁 {f['name']}/")
+                elif f.get("skipped"):
+                    lines.append(f"  📄 {f['name']} ({f['size']} bytes, 跳过: {f['skipped']})")
+                else:
+                    lines.append(f"  📄 {f['name']} ({f['size']} bytes)")
+            # 文本文件预览
+            text_files = zip_content.get("text_files", [])
+            if text_files:
+                lines.append(f"\n[文本文件预览 ({len(text_files)} 个)]")
+                for tf in text_files[:5]:
+                    lines.append(f"\n--- {tf['name']} ---")
+                    lines.append(tf['preview'][:2000])
+            if zip_content.get("error"):
+                lines.append(f"\n[错误] {zip_content['error']}")
+            return "\n".join(lines)
+        return f"[ZIP 解析失败]"
+
+    # 通用文本读取
     with path.open("rb") as source:
         size = path.stat().st_size
         if size <= TEXT_READ_LIMIT:
@@ -158,6 +399,29 @@ def extract_limited_text(path: Path) -> Optional[str]:
         text = _decode_text(data)
     if text is None:
         return None
+
+    # 结构化格式检测（JSON/YAML/OpenAPI）
+    structured = _try_parse_structured_text(text)
+    if structured:
+        stype = structured.get("type", "structured")
+        if stype == "openapi":
+            endpoints = structured.get("endpoints", [])
+            lines = [
+                f"[OpenAPI/Swagger 规范] 版本: {structured.get('openapi_version', 'N/A')}",
+                f"标题: {structured.get('title', 'N/A')}",
+                f"\n端点 ({len(endpoints)} 个):",
+            ]
+            for ep in endpoints[:30]:
+                lines.append(f"  {ep['method']:7s} {ep['path']}  {ep['summary']}")
+            if len(endpoints) > 30:
+                lines.append(f"  ... 还有 {len(endpoints) - 30} 个端点")
+            return "\n".join(lines)
+        elif stype == "json" or stype == "yaml":
+            summary = structured.get("summary", "")
+            return f"[{stype.upper()} 结构化数据]\n{summary}"
+        else:
+            return f"[{stype}]"
+
     if len(text) > TEXT_PROMPT_LIMIT:
         half = TEXT_PROMPT_LIMIT // 2
         text = f"{text[:half]}\n\n[附件文本已截断]\n\n{text[-half:]}"

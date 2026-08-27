@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { buildSetupPayload, getKeysStatus, handleApiError, logout, saveSetup, validateSetupForSave } from '../../services/api'
 import type { AgentId, AgentOverrideInputs, ConfigId, KeysStatus, ModelConfigInput, ModelKeyStatus, SetupResponse } from '../../types/api'
 import { Icon } from './Icon'
+import { McpStatusPanel } from './McpStatusPanel'
 import type { Theme } from '../../hooks/preferences'
 
 const providerSuggestions = ['openai', 'deepseek', 'openrouter', 'anthropic', 'google', 'ollama', 'lm-studio', 'custom']
@@ -20,7 +21,7 @@ const blankAgents = (): AgentOverrideInputs => ({
   operator: { enabled: false, config: blank() },
 })
 
-type SettingsSection = 'general' | 'models' | 'appearance'
+type SettingsSection = 'general' | 'models' | 'appearance' | 'tools'
 type ValidationState = { state: 'idle' | 'validating' | 'valid' | 'invalid'; message?: string }
 type ValidationStates = Record<ConfigId, ValidationState>
 
@@ -159,6 +160,7 @@ export function SettingsPanel({ standalone = false, onClose, theme = 'light', on
         <button className={section === 'general' ? 'active' : ''} onClick={() => setSection('general')}><Icon name="settings" />常规</button>
         <button className={section === 'models' ? 'active' : ''} onClick={() => setSection('models')}>◇ 模型配置</button>
         <button className={section === 'appearance' ? 'active' : ''} onClick={() => setSection('appearance')}>◐ 外观</button>
+        <button className={section === 'tools' ? 'active' : ''} onClick={() => setSection('tools')}><Icon name="tool" />工具 / MCP</button>
       </nav><form onSubmit={(event) => void save(event)}><div className="settings-content">
         {section === 'general' && <section className="settings-section"><h2>常规</h2><div className="settings-notice"><Icon name="user" /><div><strong>当前账户已受访问密码保护</strong><p>模型密钥只会提交到当前 SEC-GO 后端，浏览器不保存明文。</p></div></div></section>}
         {section === 'models' && <section className="settings-section model-settings-section">
@@ -175,6 +177,7 @@ export function SettingsPanel({ standalone = false, onClose, theme = 'light', on
           </div>
         </section>}
         {section === 'appearance' && <section className="settings-section"><h2>外观</h2><div className="appearance-row"><span>主题</span><button type="button" onClick={onThemeToggle}>{theme === 'light' ? '浅色' : '深色'} · 点击切换</button></div></section>}
+        {section === 'tools' && <McpStatusPanel />}
         {section === 'models' && <label className="check-row"><input type="checkbox" checked={validateKeys} onChange={(event) => setValidateKeys(event.target.checked)} />保存前校验所有已启用配置（新 API Key 始终校验）</label>}
         {message && <p className="settings-message">{message}</p>}
       </div><footer><button type="button" className="text-button danger" onClick={() => void logout().finally(() => window.location.assign('/login'))}>退出登录</button>{section === 'models' && <button className="primary-button" disabled={saving}>{saving ? '正在校验并保存…' : '保存设置'}</button>}</footer></form></div>

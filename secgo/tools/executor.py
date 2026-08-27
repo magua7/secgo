@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 ToolResult = Dict[str, Any]
 
 from ..config.config import get_config
-from ..kernel.skill_loader import list_skills, read_skill
+from ..kernel.skill_loader import list_skills, read_skill, route_skills
 from ..runtime.workspace import (
     _truncate_output_text,
     execute_script as ws_execute_script,
@@ -112,6 +112,8 @@ async def _dispatch_tool(
         return await execute_web_search(args.get("query") or "")
     if tool_name == "skill_list":
         return _skill_list()
+    if tool_name == "skill_route":
+        return _skill_route(args)
     if tool_name == "skill_read":
         return _skill_read(args.get("name") or "")
 
@@ -217,6 +219,42 @@ def _skill_list() -> ToolResult:
     lines = [f"SEC-GO 安全技能库（启用 {len(skills)} 个）:"]
     for s in skills:
         lines.append(f"- {s['name']} [{s['group']}]: {s['description']}")
+    return {"success": True, "output": "\n".join(lines)}
+
+
+def _skill_route(args: Dict[str, Any]) -> ToolResult:
+    task_types = args.get("task_types") or []
+    role = args.get("role") or None
+    risk_class = args.get("risk_class") or None
+    keyword = args.get("keyword") or ""
+
+    if isinstance(task_types, str):
+        task_types = [task_types]
+    task_types = [str(t) for t in task_types]
+
+    routed = route_skills(task_types, role, risk_class, limit=15)
+
+    # 附加关键词过滤
+    if keyword:
+        kw = keyword.lower()
+        routed = [s for s in routed if kw in s["name"].lower() or kw in s["description"].lower()]
+
+    if not routed:
+        return {
+            "success": True,
+            "output": (
+                f"任务类型 {task_types} 下无匹配技能。"
+                "可用 skill_list 查看全部技能。"
+            ),
+        }
+
+    lines = [
+        f"技能智能路由（任务类型: {task_types}，角色: {role or 'any'}，风险: {risk_class or 'any'}）→ 命中 {len(routed)} 个:"
+    ]
+    for s in routed:
+        risk = s.get("risk_class") or s.get("role") or s.get("group") or "ungrouped"
+        lines.append(f"- {s['name']} [{s.get('group')}] (risk={risk}): {s['description']}")
+    lines.append("\n提示: 用 skill_read <name> 读取具体技能正文后按工作流执行。")
     return {"success": True, "output": "\n".join(lines)}
 
 

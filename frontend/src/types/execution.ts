@@ -21,6 +21,18 @@ export interface ToolUse {
   status: 'running' | 'completed' | 'error'
 }
 
+export interface DecisionRecord {
+  id: string
+  timestamp: number
+  trigger: string
+  trigger_detail: string
+  observation: string
+  candidates: { id: string; description: string; target_agent: string; suggested_tools: string[]; risk: string; expected_outcome: string }[]
+  selected: string
+  reason: string
+  rejected: string[]
+}
+
 export interface EvidenceItem {
   id?: string
   type?: string
@@ -46,6 +58,7 @@ export interface ExecutionState {
   timeline: TimelineItem[]
   tools: ToolUse[]
   evidence: EvidenceItem[]
+  decisions: DecisionRecord[]
   findings: string[]
   completedSteps: string[]
   keyFindings: string[]

@@ -4,7 +4,7 @@ import type { AgentId, EvidenceItem, ExecutionState, NarrativeUpdate, TimelineIt
 export const createInitialExecutionState = (): ExecutionState => ({
   status: 'idle', phase: 'idle', activeAgent: 'planner', tasks: [], timeline: [], tools: [], evidence: [],
   findings: [], completedSteps: [], keyFindings: [], narrativeUpdates: [], keyProgress: [], report: '', currentActivity: '', assistantReply: '', finalAnswer: '', lastAssistantOutput: '', lastStreamAgent: null, startedAt: null, endedAt: null, totalSteps: 0, reason: '',
-  error: null, executionExpanded: true, connection: 'idle',
+  error: null, executionExpanded: true, connection: 'idle', decisions: [],
 })
 
 export const initialExecutionState: ExecutionState = createInitialExecutionState()
@@ -175,6 +175,28 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
         metadata: evidence.metadata,
       }
       return { ...state, evidence: [...state.evidence, record] }
+    }
+    case 'decision:reason': {
+      const decision = event.data.decision as Record<string, unknown> | undefined
+      if (!decision) return state
+      const exists = state.decisions.some((d) => d.id === decision.id)
+      if (exists) return state
+      const record = {
+        id: decision.id as string,
+        timestamp: decision.timestamp as number,
+        trigger: decision.trigger as string,
+        trigger_detail: decision.trigger_detail as string,
+        observation: decision.observation as string,
+        candidates: decision.candidates as any[],
+        selected: decision.selected as string,
+        reason: decision.reason as string,
+        rejected: decision.rejected as string[],
+      }
+      return {
+        ...state,
+        decisions: [...state.decisions, record],
+        timeline: [...state.timeline, line(state, { kind: 'finding', title: `决策: ${record.trigger}`, detail: record.reason.slice(0, 180), status: 'completed' })],
+      }
     }
     case 'persistence:warning':
       return state

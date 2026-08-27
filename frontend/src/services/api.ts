@@ -33,6 +33,12 @@ export const logout = (): Promise<{ ok: boolean }> => apiRequest('/api/logout', 
 export const getKeysStatus = (): Promise<KeysStatus> => apiRequest('/api/keys-status')
 export const getSessions = (): Promise<SessionsResponse> => apiRequest('/api/sessions')
 export const getSessionMessages = (id: string): Promise<SessionConversationResponse> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/messages`)
+
+export interface McpServerStatus { name: string; connected: boolean; tool_count: number }
+export interface McpStatus {
+  running: boolean; connected: boolean; server_count: number; servers: McpServerStatus[]; tool_count: number; tools: string[]; configured: boolean
+}
+export const getMcpStatus = (): Promise<McpStatus> => apiRequest('/api/mcp-status')
 export const cancelSession = (id: string): Promise<{ sessionId: string; cancelled: boolean }> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
 export const deleteSession = (id: string): Promise<{ sessionId: string; deleted: boolean }> => apiRequest(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 export const renameSession = (id: string, title: string): Promise<{ sessionId: string; title: string }> => apiRequest(`/api/sessions/${encodeURIComponent(id)}/title`, {

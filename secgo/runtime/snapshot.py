@@ -110,6 +110,7 @@ class RunSnapshotRecorder:
         self.partial_report: Optional[str] = None
         self.last_assistant_output: Optional[str] = None
         self.total_steps = 0
+        self.decisions: List[Dict[str, Any]] = []
         self._timeline_seq = 0
 
     # ── 内部辅助 ─────────────────────────────────────────
@@ -339,6 +340,7 @@ class RunSnapshotRecorder:
             "final_report": self.final_report,
             "partial_report": self.partial_report,
             "last_assistant_output": self.last_assistant_output,
+            "decisions": self.decisions[-20:],
             "tool_count": len(self.resources),
             "evidence_count": len(self.evidence),
             "total_steps": self.total_steps,

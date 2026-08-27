@@ -331,6 +331,8 @@ def _ensure_started() -> None:
         "engine:awaiting_input", "engine:user_input",
         # 显式证据事件 + 持久化告警：前端只据此构造 Evidence / 提示保存失败
         "engine:evidence", "persistence:warning",
+        # RePlan 决策理由事件：前端据此展示「为什么换策略」
+        "decision:reason",
     ):
         event_bus.on(event_name, make_handler(event_name))
 
@@ -349,6 +351,17 @@ def _ensure_started() -> None:
     event_bus.on("engine:awaiting_input", on_awaiting)
     event_bus.on("engine:user_input", on_resume)
     event_bus.on("engine:end", on_resume)
+
+    # ── MCP 生命周期初始化：Web 启动即拉起 MCP server（stdio/SSE） ──
+    try:
+        from ..tools.mcp_client import mcp_lifecycle
+        if not mcp_lifecycle.is_running():
+            servers = get_config().mcp.servers
+            if servers or os.environ.get("MCP_SERVER_COMMAND"):
+                loop = asyncio.get_running_loop()
+                loop.create_task(mcp_lifecycle.start(servers))
+    except Exception as exc:
+        print(f"[MCP] Web 生命周期初始化跳过: {exc}")
 
 
 def _get_channel(session_id: str) -> SessionChannel:
@@ -843,8 +856,11 @@ def _attachment_prompt(session_id: str, attachments: list) -> str:
             f"- 大小: {metadata.size} bytes",
             f"- SHA-256: {metadata.sha256}",
         ]
-        if metadata.detected_kind == "text":
-            extracted = extract_limited_text(get_session_attachment_path(session_id, metadata.attachment_id))
+        if metadata.detected_kind in ("text", "pdf", "zip"):
+            extracted = extract_limited_text(
+                get_session_attachment_path(session_id, metadata.attachment_id),
+                detected_kind=metadata.detected_kind,
+            )
             if extracted is not None:
                 lines.extend([
                     f"\n[附件 {index} 提取内容开始]",
@@ -852,7 +868,7 @@ def _attachment_prompt(session_id: str, attachments: list) -> str:
                     f"[附件 {index} 提取内容结束]",
                 ])
             else:
-                lines.append("- 状态: 内容检测为二进制，已拒绝文本提取")
+                lines.append(f"- 状态: {metadata.detected_kind} 内容提取失败")
         elif metadata.detected_kind == "image":
             lines.append("- 状态: 文件已安全保存，本阶段暂未启用图片视觉分析")
         else:
@@ -1188,6 +1204,29 @@ async def api_session_messages(session_id: str, _auth=Depends(require_ready_stat
         })
     finally:
         manager.close()
+
+
+@app.get("/api/mcp-status")
+async def api_mcp_status(_auth=Depends(require_ready_state)) -> JSONResponse:
+    """MCP 服务器连接状态 + 工具清单（前端 MCP 状态页数据源）。"""
+    from ..tools.mcp_client import mcp_lifecycle, mcp_client
+    servers: list = []
+    for server_name, entry in getattr(mcp_client, "_servers", {}).items():
+        servers.append({
+            "name": server_name,
+            "connected": True,
+            "tool_count": len(entry.get("tools") or []),
+        })
+    tools = [t["name"] for t in mcp_client.get_tools()]
+    return JSONResponse({
+        "running": mcp_lifecycle.is_running(),
+        "connected": mcp_client.is_connected(),
+        "server_count": len(servers),
+        "servers": servers,
+        "tool_count": len(tools),
+        "tools": tools,
+        "configured": len(get_config().mcp.servers) > 0 or bool(os.environ.get("MCP_SERVER_COMMAND")),
+    })
 
 
 @app.get("/favicon.ico")

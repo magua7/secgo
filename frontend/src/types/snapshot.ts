@@ -55,6 +55,7 @@ export interface RunSnapshot {
   final_report: string | null
   partial_report: string | null
   last_assistant_output?: string | null
+  decisions?: Record<string, unknown>[]
   tool_count: number
   evidence_count: number
   total_steps: number

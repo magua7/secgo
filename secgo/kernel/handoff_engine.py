@@ -1,4 +1,4 @@
-"""SEC-GO 多 Agent 交接引擎（纯函数引擎 + 事件总线输出 + 用户输入挂起机制）。"""
+"""SEC-GO 多 Agent 交接引擎(纯函数引擎 + 事件总线输出 + 用户输入挂起机制)."""
 
 import asyncio
 import json
@@ -16,6 +16,7 @@ from ..runtime.session import SessionManager, resolve_session_db_path
 from ..runtime.snapshot import classify_tool_evidence
 from ..tools.executor import execute_tool
 from ..tools.mcp_client import mcp_client
+from .plan_state import PlanState, ReplanDetector, DecisionRecord
 from ..tools.registry import (
     all_tool_definitions,
     build_tool_set,
@@ -39,13 +40,13 @@ logger = logging.getLogger("secgo.session")
 
 
 def _save_state_with_retry(manager: SessionManager, session_id: str, state: Dict[str, Any], attempts: int = 3) -> bool:
-    """关键执行状态落库：失败必须可见（log + 重试 + persistence:warning），绝不静默吞掉。"""
+    """关键执行状态落库:失败必须可见(log + 重试 + persistence:warning),绝不静默吞掉."""
     last: Optional[Exception] = None
     for attempt in range(attempts):
         try:
             manager.save_state(session_id, state)
             return True
-        except Exception as exc:  # 不 pass：记录并重试
+        except Exception as exc:  # 不 pass:记录并重试
             last = exc
             logger.exception(
                 "session persistence failure (attempt %d) for %s", attempt + 1, session_id
@@ -63,7 +64,7 @@ def _save_state_with_retry(manager: SessionManager, session_id: str, state: Dict
 
 
 def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """清洗消息历史：移除/转换孤立的 tool 消息（OpenAI 兼容约束）。"""
+    """清洗消息历史:移除/转换孤立的 tool 消息(OpenAI 兼容约束)."""
     if not messages:
         return messages
 
@@ -85,7 +86,7 @@ def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if all_match:
                 result.append(msg)
             else:
-                # 孤立 tool 消息 → 转为 user 消息，保留上下文信息
+                # 孤立 tool 消息 → 转为 user 消息,保留上下文信息
                 result.append({
                     "role": "user",
                     "content": f"[工具结果 {tool_call_id}]: {msg.get('content', '')}",
@@ -100,6 +101,20 @@ def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ── 用户输入等待机制 ──────────────────────────────────────
 
 CONTROL_TOOLS = {"handoff_to_agent", "task_complete"}
+
+REPLAN_SYSTEM_PROMPT = """[系统 RePlan 指令]
+
+系统检测到当前执行路径需要重新规划.触发原因: {trigger}.
+
+请按以下步骤执行:
+1. 回顾当前任务目标和已有发现
+2. 评估当前策略的有效性
+3. 制定新的执行计划(包含具体步骤和预期目标)
+4. 如果方向彻底改变,handoff 给 Planner 重新规划
+
+原计划(将被替换): {current_plan}
+新计划请以 '## 新计划' 开头输出."""
+
 AGENT_PROTOCOL_ERROR = """[Agent Protocol Error]
 
 A single Agent turn may contain either:
@@ -127,7 +142,7 @@ async def _wait_for_user_input(session_id: str) -> str:
 
 
 def provide_user_input(session_id: str, user_input: str) -> bool:
-    """向引擎提供新的用户输入，恢复被挂起的引擎循环。"""
+    """向引擎提供新的用户输入,恢复被挂起的引擎循环."""
     future = _input_resolvers.get(session_id)
     if future is None or future.done():
         return False
@@ -151,7 +166,7 @@ def cancel_waiting_input(session_id: str) -> bool:
 
 
 def _mcp_tools_for_agent(agent_id: str, context: str) -> List[Dict[str, Any]]:
-    """Operator 全量、其余 Agent 按关键词评分取前 5（移植 TS router 逻辑）。"""
+    """Operator 全量、其余 Agent 按关键词评分取前 5(移植 TS router 逻辑)."""
     all_tools = mcp_client.get_tools()
     if not all_tools:
         return []
@@ -213,6 +228,14 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
     todo_tracker = TodoTracker()
 
     saved_state = session_manager.load_state(sid)
+    plan_state = PlanState(goal=user_input[:500])
+    # 从保存的状态恢复 PlanState
+    if saved_state is not None:
+        plan_data = saved_state.get("planState")
+        if plan_data:
+            plan_state = PlanState.from_serializable(plan_data)
+
+    saved_state = session_manager.load_state(sid)
     if saved_state is not None:
         active_agent_id = saved_state.get("activeAgentId", "planner")
         messages = list(saved_state.get("messages") or [])
@@ -221,8 +244,8 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
         if todo_list:
             todo_tracker.restore(list(todo_list))
 
-    # 状态保存合并：同一步内的多次保存只保留最新状态，落库推迟到步骤边界/退出前
-    # （事件循环内每步至多序列化一次；最后一步的保存由 finally 兜底落库，不丢失）
+    # 状态保存合并:同一步内的多次保存只保留最新状态,落库推迟到步骤边界/退出前
+    # (事件循环内每步至多序列化一次;最后一步的保存由 finally 兜底落库,不丢失)
     pending_save: Optional[Dict[str, Any]] = None
 
     def save_session_state(state: Dict[str, Any]) -> None:
@@ -234,16 +257,17 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
         state = pending_save
         pending_save = None
         if state is None:
-            # 无待保存状态（如引擎异常崩溃）时也构造一份，保证 engine context 兜底落库
+            # 无待保存状态(如引擎异常崩溃)时也构造一份,保证 engine context 兜底落库
             state = {
                 "activeAgentId": active_agent_id,
                 "messages": messages,
                 "stepCount": step_count,
                 "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
             }
         _save_state_with_retry(session_manager, sid, state)
 
-    # 修正：engine:start 必须携带解析后的 sid（原实现传的是可能为 None 的入参 session_id）
+    # 修正:engine:start 必须携带解析后的 sid(原实现传的是可能为 None 的入参 session_id)
     event_bus.emit("engine:start", {"session_id": sid, "user_input": user_input})
 
     try:
@@ -256,12 +280,50 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 active_agent_id = "planner"
             step_count += 1
 
-            if step_count % 10 == 0 and step_count > 0:
+            # ── RePlan 检测 ──────────────────────────────────────
+            replan_trigger = plan_state.detector.check(step_count, active_agent_id)
+            if replan_trigger is not None:
+                # 触发生成决策
+                decision = plan_state.trigger_replan(
+                    trigger=replan_trigger["trigger"],
+                    trigger_detail=replan_trigger["detail"],
+                    active_agent_id=active_agent_id,
+                )
+                event_bus.emit("decision:reason", {
+                    "session_id": sid,
+                    "decision": decision.to_dict(),
+                    "step": step_count,
+                })
+                replan_prompt = REPLAN_SYSTEM_PROMPT.format(
+                    trigger=replan_trigger["detail"],
+                    current_plan=plan_state.current_plan[:200],
+                )
+                messages.append({
+                    "role": "user",
+                    "content": replan_prompt,
+                })
+                # 如果是 handoff 回 Planner 的策略,强制 handoff
+                if decision.candidates and decision.candidates[0].target_agent == "planner" and active_agent_id != "planner":
+                    prev_agent_id = active_agent_id
+                    active_agent_id = "planner"
+                    event_bus.emit("agent:switch", {
+                        "session_id": sid,
+                        "from_agent_id": prev_agent_id,
+                        "to_agent_id": active_agent_id,
+                        "reason": f"RePlan: {replan_trigger['trigger']} - {decision.reason[:100]}",
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": f"[RePlan 强制 Handoff from {prev_agent_id}]: {decision.reason}",
+                    })
+                    continue
+            # ── 每 10 步通用提示(仅当未触发 RePlan 时) ──
+            elif step_count % 10 == 0 and step_count > 0:
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"[系统提示：你已执行 {step_count} 步。如果长时间无进展，"
-                        "考虑总结当前发现并 handoff 给 Planner。]"
+                        f"[系统提示:你已执行 {step_count} 步.如果长时间无进展,"
+                        "考虑总结当前发现并 handoff 给 Planner.]"
                     ),
                 })
 
@@ -282,6 +344,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "messages": messages,
                     "stepCount": step_count,
                     "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                 })
                 return {"reason": "budget_exceeded", "total_steps": step_count}
 
@@ -292,7 +355,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
             tools = build_tool_set(tool_defs)
             if mcp_client.is_connected():
                 try:
-                    # 评分上下文：从最近消息向前累计，总字符数约 50KB 即停止（内部评分输入，可近似）
+                    # 评分上下文:从最近消息向前累计,总字符数约 50KB 即停止(内部评分输入,可近似)
                     context_parts: List[str] = []
                     context_budget = 50 * 1024
                     for m in reversed(messages):
@@ -338,8 +401,8 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     summary = await summarize_messages(safe_messages, agent.subscription)
                     compacted = await compact_messages_with_summary(safe_messages, summary)
                     if len(compacted) < len(safe_messages):
-                        # 原地压缩写回消息本体：后续 append/保存/上下文构建基于压缩后的历史；
-                        # compact_messages_with_summary 已保证首条 user 消息保留（head 规则）
+                        # 原地压缩写回消息本体:后续 append/保存/上下文构建基于压缩后的历史;
+                        # compact_messages_with_summary 已保证首条 user 消息保留(head 规则)
                         messages[:] = compacted
                     safe_messages = compacted
                     summary_tokens = estimate_messages_tokens(safe_messages)
@@ -354,6 +417,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                         "stepCount": step_count,
                         "summaryCache": summary,
                         "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                     })
 
                 formatted_todo = todo_tracker.get_formatted_todo()
@@ -380,6 +444,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "messages": messages,
                     "stepCount": step_count,
                     "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                 })
                 return {"reason": "error", "total_steps": step_count}
 
@@ -416,6 +481,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 "messages": messages,
                 "stepCount": step_count,
                 "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
             })
 
             if response.text:
@@ -441,6 +507,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "messages": messages,
                     "stepCount": step_count,
                     "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                 })
                 continue
 
@@ -464,6 +531,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                         "messages": messages,
                         "stepCount": step_count,
                         "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                     })
                     continue
 
@@ -478,6 +546,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "messages": messages,
                     "stepCount": step_count,
                     "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                     "completionSummary": summary,
                 })
                 event_bus.emit("engine:end", {
@@ -491,6 +560,8 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "reason": "completed",
                     "total_steps": step_count,
                     "summary": summary,
+                    "replan_count": plan_state.replan_count,
+                    "decision_count": len(plan_state.decision_history),
                 }
 
             if control_call is not None and control_call["name"] == "handoff_to_agent":
@@ -548,6 +619,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
 
                 prev_agent_id = active_agent_id
                 active_agent_id = target
+                plan_state.detector.record_handoff(step_count)
                 event_bus.emit("agent:switch", {
                     "session_id": sid,
                     "from_agent_id": prev_agent_id,
@@ -559,6 +631,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "messages": messages,
                     "stepCount": step_count,
                     "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
                 })
                 messages.append({
                     "role": "user",
@@ -575,6 +648,20 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
 
                 result = await execute_tool(tc["name"], tc["arguments"], sid, agent.id)
 
+                # 记录工具结果到 RePlan 检测器
+                plan_state.detector.record_tool_call(
+                    tc["name"],
+                    success=result.get("success", False),
+                    step=step_count,
+                )
+                if not result.get("success", False):
+                    plan_state.add_failure(
+                        agent_id=agent.id,
+                        tool_name=tc["name"],
+                        error=result.get("error", "Unknown error"),
+                        step=step_count,
+                    )
+
                 event_bus.emit("tool:stream-end", {
                     "session_id": sid,
                     "tool_name": tc["name"],
@@ -587,7 +674,7 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "result": result.get("output") if result.get("success") else result.get("error"),
                 })
 
-                # 只有明确属于证据语义的工具结果才产出 Evidence；普通 Tool Result 不进 Evidence
+                # 只有明确属于证据语义的工具结果才产出 Evidence;普通 Tool Result 不进 Evidence
                 evidence_record = classify_tool_evidence(tc["name"], result)
                 if evidence_record is not None:
                     event_bus.emit("engine:evidence", {
@@ -628,15 +715,16 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 "messages": messages,
                 "stepCount": step_count,
                 "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
             })
 
             if business_calls:
                 continue
 
-            # 无工具调用 → 纯文本输出，默认挂起等待用户输入
+            # 无工具调用 → 纯文本输出,默认挂起等待用户输入
             if os.environ.get("SECGO_AUTO_CONTINUE") == "1":
-                # 自动继续模式（headless/脚本）：不挂起，将引擎文本回灌为 user 消息继续循环
-                auto_input = (response.text or "").strip() + "\n请继续，若已完成请调用 task_complete。"
+                # 自动继续模式(headless/脚本):不挂起,将引擎文本回灌为 user 消息继续循环
+                auto_input = (response.text or "").strip() + "\n请继续,若已完成请调用 task_complete."
                 event_bus.emit("engine:user_input", {
                     "session_id": sid,
                     "input": auto_input,
@@ -655,8 +743,9 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 "messages": messages,
                 "stepCount": step_count,
                 "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
             })
-            flush_pending_save()  # 挂起等待输入前落库，避免长挂起期间状态仅存于内存
+            flush_pending_save()  # 挂起等待输入前落库,避免长挂起期间状态仅存于内存
             new_user_input = await _wait_for_user_input(sid)
             event_bus.emit("engine:user_input", {
                 "session_id": sid,
@@ -675,9 +764,10 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
             "messages": messages,
             "stepCount": step_count,
             "todoList": todo_tracker.get_all_tasks(),
+                "planState": plan_state.to_serializable(),
         })
         return {"reason": "max_steps", "total_steps": step_count}
     finally:
         cancel_waiting_input(sid)
-        flush_pending_save()  # 兜底：最后一步的 engine context 保存必须落库
+        flush_pending_save()  # 兜底:最后一步的 engine context 保存必须落库
         session_manager.close()

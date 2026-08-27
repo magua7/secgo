@@ -7,11 +7,12 @@ export interface AgentThinkingData extends BaseData { agent_id?: AgentId }
 export interface AgentSwitchData extends BaseData { from_agent_id?: AgentId; to_agent_id?: AgentId; reason?: string }
 export interface ToolData extends BaseData { agent_id?: AgentId; tool_name?: string; args?: Record<string, unknown>; result?: unknown }
 export interface StreamData extends BaseData { agent_id?: AgentId; chunk?: string; text?: string }
-export interface EndData extends BaseData { reason?: string; total_steps?: number; error?: string }
+export interface EndData extends BaseData { reason?: string; total_steps?: number; error?: string; replan_count?: number; decision_count?: number }
 export interface ErrorData extends BaseData { agent_id?: AgentId; error?: string }
 export interface TodoData extends BaseData { todo_list?: TodoItem[] }
 export interface AwaitingData extends BaseData { agent_id?: AgentId; message?: string }
 export interface BudgetData extends BaseData { usage?: number; limit?: number }
+export interface DecisionData extends BaseData { decision?: Record<string, unknown>; step?: number }
 export interface EvidenceData extends BaseData { evidence?: EvidenceItem }
 export interface PersistenceWarningData extends BaseData { error?: string }
 
@@ -37,7 +38,7 @@ export const SSE_EVENT_NAMES = [
   'engine:start', 'agent:thinking', 'agent:switch', 'tool:call', 'tool:result',
   'llm:stream', 'engine:text', 'engine:end', 'budget:exceeded', 'engine:error',
   'todo:updated', 'tool:stream-start', 'tool:stream-end', 'engine:awaiting_input',
-  'engine:user_input', 'engine:evidence', 'persistence:warning',
+  'engine:user_input', 'engine:evidence', 'persistence:warning', 'decision:reason',
 ] as const
 
 export type SseEventName = typeof SSE_EVENT_NAMES[number]

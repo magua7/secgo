@@ -9,6 +9,17 @@ export interface ResourceGroup {
   invocations: ToolUse[]
 }
 
+import type { DecisionRecord } from './execution'
+
+export type ExecutionTraceTab = 'trace' | 'evidence' | 'resources' | 'decisions'
+
+export interface ResourceGroup {
+  name: string
+  count: number
+  type?: string
+  invocations: ToolUse[]
+}
+
 export interface ExecutionTraceViewModel {
   mode: 'live' | 'history'
   kind: 'empty' | 'direct_response' | 'agent_task'
@@ -16,6 +27,7 @@ export interface ExecutionTraceViewModel {
   activeAgent: AgentId
   timeline: Array<Omit<TimelineItem, 'at'> & { at: number | null }>
   evidence: EvidenceItem[]
+  decisions: DecisionRecord[]
   resources: ResourceGroup[]
   notice: string | null
 }

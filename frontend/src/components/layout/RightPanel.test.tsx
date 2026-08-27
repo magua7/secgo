@@ -11,7 +11,7 @@ describe('RightPanel', () => {
     const view: ExecutionTraceViewModel = {
       mode: 'history', kind: 'agent_task', status: 'completed', activeAgent: 'builder',
       timeline: [{ id: 'h1', at: 1000, kind: 'tool', title: '调用 web_search', detail: 'HTTP 200', status: 'completed' }],
-      evidence: [{ id: 'e1', type: 'finding', title: '网页搜索结果', source: 'web_search', summary: 'found' }],
+      evidence: [{ id: 'e1', type: 'finding', title: '网页搜索结果', source: 'web_search', summary: 'found' }], decisions: [],
       resources: [{ name: 'web_search', count: 1, invocations: [{ name: 'web_search', status: 'completed', result: 'found' }] }],
       notice: null,
     }

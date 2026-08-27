@@ -92,6 +92,22 @@ SKILL_LIST_DEF = ToolDefinition(
     allowed_agents=[],
 )
 
+SKILL_ROUTE_DEF = ToolDefinition(
+    name="skill_route",
+    description="按任务类型/角色/风险等级进行安全技能智能路由。传入任务类型（如 pentest/ctf/reverse_analysis/incident_response），返回匹配该任务的安全技能清单。任务开始后优先调用，用结构化方式代替纯关键词搜索。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "task_types": {"type": "array", "items": {"type": "string"}, "description": "任务类型列表，如 ['pentest'] 或 ['ctf','reverse_analysis']"},
+            "role": {"type": "string", "description": "角色过滤（可选）：leaf/router/orchestrator/quality_gate"},
+            "risk_class": {"type": "string", "description": "风险等级过滤（可选）：passive/active/lab_only"},
+            "keyword": {"type": "string", "description": "附加关键词（可选），用于进一步收窄"},
+        },
+        "required": ["task_types"],
+    },
+    allowed_agents=[],
+)
+
 SKILL_READ_DEF = ToolDefinition(
     name="skill_read",
     description="读取指定安全技能的全文工作流（攻击手法、命令参考、判定规则）。命中漏洞类型时调用，按其中工作流执行。技能是知识指导，不替代工具。",
@@ -111,6 +127,7 @@ BUILTIN_TOOL_DEFINITIONS: List[ToolDefinition] = [
     TASK_COMPLETE_DEF,
     SKILL_LIST_DEF,
     SKILL_READ_DEF,
+    SKILL_ROUTE_DEF,
 ]
 
 
