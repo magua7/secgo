@@ -13,7 +13,7 @@ from ..model.provider import stream_agent_response
 from ..runtime.budget import BudgetManager, estimate_messages_tokens, estimate_tokens
 from ..runtime.eventbus import event_bus, set_current_session
 from ..runtime.session import SessionManager, resolve_session_db_path
-from ..runtime.snapshot import classify_tool_evidence
+from ..runtime.snapshot import build_evidence_records, evidence_dedupe_key
 from ..tools.executor import execute_tool
 from ..tools.mcp_client import mcp_client
 from .plan_state import PlanState, ReplanDetector, DecisionRecord
@@ -263,6 +263,10 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
     # 每次 Run 都重新获得 Run 级额度：清 run_replan_count / exhaustion_notice /
     # detector 触发窗口；goal、计划、失败历史、决策历史等 Task State 全部保留
     plan_state.reset_for_new_run()
+
+    # Evidence 去重记忆（Run 级）：同一 Flag/关键值在重复验证中只发一次 engine:evidence，
+    # 避免同一条关键发现因为多次 curl / Agent 复核产生多张重复证据卡
+    seen_evidence_keys: Set[str] = set()
 
     # 状态保存合并:同一步内的多次保存只保留最新状态,落库推迟到步骤边界/退出前
     # (事件循环内每步至多序列化一次;最后一步的保存由 finally 兜底落库,不丢失)
@@ -713,9 +717,13 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                     "result": result.get("output") if result.get("success") else result.get("error"),
                 })
 
-                # 只有明确属于证据语义的工具结果才产出 Evidence;普通 Tool Result 不进 Evidence
-                evidence_record = classify_tool_evidence(tc["name"], result)
-                if evidence_record is not None:
+                # Evidence Gate（分层）：工具成功 + 真实输出 + 命中高价值安全信号才产出 Evidence；
+                # execute_bash / mcp_* 是候选来源，普通输出仍只留在执行轨迹。
+                for evidence_record in build_evidence_records(tc["name"], result):
+                    dedupe_key = evidence_dedupe_key(evidence_record)
+                    if dedupe_key in seen_evidence_keys:
+                        continue
+                    seen_evidence_keys.add(dedupe_key)
                     event_bus.emit("engine:evidence", {
                         "session_id": sid,
                         "evidence": evidence_record,

@@ -1,5 +1,6 @@
 import type { ExecutionEvent } from '../types/events'
 import type { AgentId, EvidenceItem, ExecutionState, NarrativeUpdate, TimelineItem, ToolUse } from '../types/execution'
+import { referencesInternalControl, sanitizeTodoItems } from '../utils/todoDisplay'
 
 export const createInitialExecutionState = (): ExecutionState => ({
   status: 'idle', phase: 'idle', activeAgent: 'planner', tasks: [], timeline: [], tools: [], evidence: [],
@@ -101,19 +102,24 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
     case 'tool:call':
     case 'tool:stream-start': {
       const name = event.data.tool_name ?? '未知工具'
-      if (state.tools.some((tool) => tool.name === name && tool.status === 'running')) return state
+      const internalControl = referencesInternalControl(name) || (name === 'handoff_to_agent')
+      if (!internalControl && state.tools.some((tool) => tool.name === name && tool.status === 'running')) return state
       return {
         ...state,
-        phase: 'executing', currentActivity: `${state.activeAgent} 正在调用 ${name}`, executionExpanded: true,
+        phase: 'executing', currentActivity: internalControl ? `${state.activeAgent} 正在汇报收尾` : `${state.activeAgent} 正在调用 ${name}`, executionExpanded: true,
         narrativeUpdates: archiveNarrative(state), report: '', assistantReply: '', finalAnswer: '',
-        tools: [...state.tools, { name, args: event.data.args, status: 'running' }],
-        timeline: [...state.timeline, line(state, { kind: 'tool', agent: event.data.agent_id ?? state.activeAgent, title: `调用 ${name}`, status: 'running' })],
+        tools: internalControl ? state.tools : [...state.tools, { name, args: event.data.args, status: 'running' }],
+        timeline: [...state.timeline, line(state, { kind: 'tool', agent: event.data.agent_id ?? state.activeAgent, title: internalControl ? '正在生成最终汇报' : `调用 ${name}`, status: 'running' })],
       }
     }
     case 'tool:result':
     case 'tool:stream-end': {
       const name = event.data.tool_name ?? '未知工具'
       const result = textResult(event.data.result).slice(0, 1200)
+      // 内部控制工具（task_complete 等）不计入业务工具清单与时间线，仅更新活动文案
+      if (referencesInternalControl(name)) {
+        return { ...state, phase: state.phase === 'reporting' ? state.phase : 'executing', currentActivity: '最终汇报已生成，任务进入收尾', executionExpanded: true }
+      }
       const duplicate = event.type === 'tool:result' && state.tools.some((tool) => tool.name === name && tool.status === 'completed' && tool.result === result)
       if (duplicate) return state
       return {
@@ -138,7 +144,7 @@ export function executionReducer(state: ExecutionState, event: ExecutionEvent): 
       return { ...state, report: state.report || text, assistantReply: text, lastAssistantOutput: text, lastStreamAgent: agent, finalAnswer: state.finalAnswer, narrativeUpdates: appendNarrative(state.narrativeUpdates, text, agent) }
     }
     case 'todo:updated': {
-      const tasks = event.data.todo_list ?? []
+      const tasks = sanitizeTodoItems(event.data.todo_list ?? [])
       const completedSteps = tasks.filter((task) => task.done && !state.tasks.some((old) => old.text === task.text && old.done)).reduce((items, task) => appendUnique(items, task.text), state.completedSteps)
       return { ...state, phase: state.phase === 'executing' || state.phase === 'reporting' ? state.phase : 'planning', currentActivity: state.currentActivity || 'Planner 正在规划执行路径', tasks, completedSteps, executionExpanded: state.phase !== 'reporting' }
     }

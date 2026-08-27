@@ -263,6 +263,9 @@ async def compact_messages_with_summary(
 # ── TODO 追踪 ─────────────────────────────────────────────
 
 _TODO_RE = re.compile(r"- \[([ xX])\] (.+)")
+# 内部控制工具名（task_complete / handoff_to_agent）属于引擎协议事件，
+# 不应作为用户任务项进入 TODO（Planner 收尾时可能写出「最终汇报并 task_complete」这类行）
+_INTERNAL_CONTROL_RE = re.compile(r"\bhandoff_to_agent\b|\btask[\s_-]*complete\b", re.IGNORECASE)
 
 
 class TodoTracker:
@@ -273,6 +276,7 @@ class TodoTracker:
         return [
             {"text": match.group(2), "done": match.group(1) != " "}
             for match in _TODO_RE.finditer(text)
+            if not _INTERNAL_CONTROL_RE.search(match.group(2))
         ]
 
     def update_todo(self, tasks: List[Dict[str, Any]]) -> None:

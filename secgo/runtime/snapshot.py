@@ -11,13 +11,19 @@ RunSnapshot，前端据此用同一套 Renderer 渲染 ExecutionBlock / RightPan
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-# 明确属于「可复核事实」的工具：这些工具的结果天然是证据（web 检索 / DNS / 端口）。
-# execute_bash / skill_list / skill_read / write_to_workspace / handoff 等一律不算证据。
+# ── Evidence 来源资格（第一层之外的准入名单）────────────────────
+# - EVIDENCE_TOOLS：结果天然是「可复核事实」的工具（web 检索 / DNS / 端口），
+#   成功 + 真实输出即可成为证据（informational/confirmed 事实类）。
+# - CANDIDATE_EVIDENCE_TOOLS / mcp_ 前缀：Evidence 候选来源。候选 ≠ 自动成立：
+#   只有输出命中高价值安全信号（Flag、认证绕过、漏洞验证成功、CVE、开放端口、
+#   服务 Banner、敏感信息泄露等）才进入关键证据；普通输出只留在执行轨迹。
 EVIDENCE_TOOLS = {"web_search", "dns_lookup", "port_scan"}
+CANDIDATE_EVIDENCE_TOOLS = {"execute_bash", "execute_workspace_script"}
 
 _EVIDENCE_TITLE_BY_TOOL = {
     "web_search": "网页搜索结果",
@@ -29,6 +35,13 @@ _EVIDENCE_TYPE_BY_TOOL = {
     "web_search": "finding",
     "dns_lookup": "network",
     "port_scan": "network",
+}
+
+# trusted 工具的置信度：端口/DNS 是对目标的直接探测事实，搜索是辅助情报
+_EVIDENCE_CONFIDENCE_BY_TOOL = {
+    "web_search": "informational",
+    "dns_lookup": "confirmed",
+    "port_scan": "confirmed",
 }
 
 _SNAPSHOT_DETAIL_CHARS = 2000
@@ -45,8 +58,12 @@ def _bounded(value: Any, limit: int) -> str:
 
 
 def is_evidence_tool(tool_name: str) -> bool:
-    # 只有明确白名单的工具才可能产出证据；工具名 mcp_ 前缀不代表结果天然是证据。
-    return tool_name in EVIDENCE_TOOLS
+    """来源资格：trusted 工具或候选工具（含 mcp_ 前缀）才可能产出证据。"""
+    return tool_name in EVIDENCE_TOOLS or _is_candidate_evidence_tool(tool_name)
+
+
+def _is_candidate_evidence_tool(tool_name: str) -> bool:
+    return tool_name in CANDIDATE_EVIDENCE_TOOLS or tool_name.startswith("mcp_")
 
 
 _NO_RESULT_MARKERS = (
@@ -71,34 +88,255 @@ def _is_no_result_output(text: str) -> bool:
     return False
 
 
-def classify_tool_evidence(tool_name: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """把单个工具结果转换为 EvidenceRecord（或 None）。
+# ── 第二层：结构化 / 规则判断 ─────────────────────────────────
+# 关键词只是第一层快速识别，真正的判定是「工具成功 + 有真实输出 + 命中高价值安全信号」。
+# 命中的是「结果内容」而非「用了什么工具」：execute_bash 与 mcp_* 的输出与
+# web_search 走同一套信号规则，不因工具名而自动放行。
 
-    证据 Gate：只有「工具执行成功 + 存在真实有效结果 + 不是 error/no-result/timeout」才会成为证据。
-    - 工具失败（success=False）绝不成为证据；
-    - "No search results found" / 空结果 / 明显无结果输出不成为证据；
-    - 工具类型（web_search / mcp_*）只是候选，内容仍须通过 Gate。
-    """
-    if not is_evidence_tool(tool_name):
-        return None
-    if not result.get("success"):
-        return None
-    output = result.get("output")
-    if output in (None, "", "(no output)"):
-        return None
-    text = output if isinstance(output, str) else str(output)
-    if _is_no_result_output(text):
-        return None
-    summary = _bounded(text, _SNAPSHOT_SUMMARY_CHARS)
+_FLAG_RE = re.compile(r"\b(?:ctf|flag)\{[^{}\s]{2,120}\}", re.IGNORECASE)
+
+_EVIDENCE_SIGNAL_DEFS = (
+    {
+        "key": "exploit_success",
+        "title": "漏洞利用验证成功",
+        "type": "finding",
+        "confidence": "confirmed",
+        "patterns": (
+            re.compile(
+                r"(?:sql\s*injection|xss|ssrf|rce|command\s*injection|path\s*traversal|"
+                r"lfi|rfi|ssti|xxe|insecure\s+deserialization|arbitrary\s+file\s+(?:read|upload))\b"
+                r"[^;\n]{0,120}\b(?:confirmed|verified|successful|succeeded|works?)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(r"\bsuccessfully\s+(?:exploited|executed|triggered|achieved)\b", re.IGNORECASE),
+            re.compile(
+                r"\b(?:authentication|auth|login|authorization)\s+bypass\s+(?:was\s+)?"
+                r"(?:successful|succeeded|confirmed|verified)",
+                re.IGNORECASE,
+            ),
+        ),
+    },
+    {
+        "key": "auth_privilege",
+        "title": "认证绕过/权限提升验证成功",
+        "type": "finding",
+        "confidence": "confirmed",
+        "patterns": (
+            re.compile(r"\blogged[\s_-]?in\s+as\s+(an?\s+)?admin(?:istrator)?\b", re.IGNORECASE),
+            re.compile(r"\byou\s+are\s+(now\s+)?(an?\s+)?admin(?:istrator)?\b", re.IGNORECASE),
+            re.compile(r"\bwelcome\b.{0,20}\badministrator\b", re.IGNORECASE),
+            re.compile(r"\bprivilege\s+escalation\s+(?:was\s+)?(?:successful|succeeded|achieved)", re.IGNORECASE),
+            re.compile(r"\brole[=:]\s*admin\b[^;\n]{0,60}\b(?:ok|success|welcome|accepted|granted)\b", re.IGNORECASE),
+        ),
+    },
+    {
+        "key": "cve_intel",
+        "title": "发现相关 CVE 漏洞情报",
+        "type": "finding",
+        "confidence": "probable",
+        "patterns": (re.compile(r"\bCVE-\d{4}-\d{4,7}\b"),),
+    },
+    {
+        "key": "open_ports",
+        # nmap 风格 “80/tcp open” 与 port_scan 输出 “2 open port(s): 80, 443”
+        "title": "发现开放端口/暴露服务",
+        "type": "network",
+        "confidence": "confirmed",
+        "patterns": (
+            re.compile(r"\b\d{1,5}/tcp\s+open"),
+            re.compile(r"\b[1-9]\d*\s+open\s+ports?\(", re.IGNORECASE),
+        ),
+    },
+    {
+        "key": "service_banner",
+        "title": "获取服务版本/Banner 信息",
+        "type": "network",
+        "confidence": "confirmed",
+        "patterns": (
+            re.compile(r"(?m)^[ \t]*(?:Server|X-Powered-By|Banner)[ \t]*[:|]"),
+            re.compile(
+                r"\b(?:nginx|apache|microsoft-?iis|openssh|mysql|postgresql|redis|tomcat|jenkins)"
+                r"[/ ]v?\d+\.\d+",
+                re.IGNORECASE,
+            ),
+        ),
+    },
+    {
+        "key": "sensitive_leak",
+        "title": "敏感信息泄露证据",
+        "type": "file",
+        "confidence": "probable",
+        "patterns": (
+            re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
+            re.compile(r"\broot:[x*!]?:0:0:"),  # /etc/passwd 内容读取
+            re.compile(
+                r"\b(?:password|passwd|api[_-]?key|secret|access[_-]?token)\s*[=:]\s*\S{6,}",
+                re.IGNORECASE,
+            ),
+        ),
+    },
+)
+
+_MAX_EVIDENCE_PER_RESULT = 4
+
+
+def _unique_flags(text: str) -> List[str]:
+    flags: List[str] = []
+    seen: set[str] = set()
+    for match in _FLAG_RE.finditer(text):
+        value = match.group(0)
+        low = value.lower()
+        if low not in seen:
+            seen.add(low)
+            flags.append(value)
+    return flags
+
+
+def _matched_line(text: str, match: "re.Match[str]") -> str:
+    """提取命中所在的一行作为证据摘要，退化为命中片段本身。"""
+    start = text.rfind("\n", 0, match.start()) + 1
+    end = text.find("\n", match.end())
+    if end == -1:
+        end = len(text)
+    line = text[start:end].strip()
+    return _bounded(line, _SNAPSHOT_SUMMARY_CHARS) or _bounded(match.group(0), _SNAPSHOT_SUMMARY_CHARS)
+
+
+def _make_evidence_record(
+    tool_name: str,
+    *,
+    title: str,
+    type_: str,
+    confidence: str,
+    summary: str,
+    signal: str,
+    dedupe_key: str,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "tool": tool_name,
+        "success": True,
+        "signal": signal,
+        "confidence": confidence,
+        "dedupe_key": dedupe_key,
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
     return {
         "id": f"evidence-{uuid.uuid4().hex[:12]}",
-        "type": _EVIDENCE_TYPE_BY_TOOL.get(tool_name, "finding" if tool_name.startswith("mcp_") else "artifact"),
-        "title": _EVIDENCE_TITLE_BY_TOOL.get(tool_name, f"{tool_name} 结果"),
+        "type": type_,
+        "title": title,
         "summary": summary,
         "source": tool_name,
+        "confidence": confidence,
         "timestamp": int(time.time() * 1000),
-        "metadata": {"tool": tool_name, "success": bool(result.get("success"))},
+        "metadata": metadata,
     }
+
+
+def build_evidence_records(tool_name: str, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """把单个工具结果转换为 0..N 条 EvidenceRecord（分层 Gate）。
+
+    判定链：执行成功？ → 有真实有效输出？ → 是否命中高价值安全发现？ → 是否重复？
+    - 第一层（确定性 Gate）：success=False / 空输出 / no-result / timeout 等一律拒绝；
+    - 第二层（结构化规则）：按结果内容匹配 Flag / 漏洞验证 / 认证绕过 / CVE /
+      开放端口 / Banner / 敏感泄露等信号，候选工具（execute_bash、mcp_* 等）
+      只有命中信号才成为证据——普通 ls、打开首页不会进入关键证据；
+    - trusted 工具（web_search / dns_lookup / port_scan）保持旧行为：
+      成功且有真实输出即为事实类证据；若同时命中更强信号则用具体信号卡片。
+    """
+    if not result.get("success"):
+        return []
+    output = result.get("output")
+    if output in (None, "", "(no output)"):
+        return []
+    text = output if isinstance(output, str) else str(output)
+    if _is_no_result_output(text):
+        return []
+
+    trusted = tool_name in EVIDENCE_TOOLS
+    if not trusted and not _is_candidate_evidence_tool(tool_name):
+        return []
+
+    records: List[Dict[str, Any]] = []
+
+    # 高价值强证据：Flag（跨工具通用，逐个唯一 Flag 一条）
+    for flag_value in _unique_flags(text)[:2]:
+        records.append(_make_evidence_record(
+            tool_name,
+            title="Flag 获取成功",
+            type_="finding",
+            confidence="confirmed",
+            summary=f"{tool_name} 结果中获取到 Flag：{flag_value}",
+            signal="flag",
+            dedupe_key=f"flag:{flag_value.lower()}",
+            extra_metadata={"flag": flag_value},
+        ))
+
+    used_signal_keys: set[str] = set()
+    for sig in _EVIDENCE_SIGNAL_DEFS:
+        if sig["key"] in used_signal_keys or len(records) >= _MAX_EVIDENCE_PER_RESULT:
+            continue
+        for pattern in sig["patterns"]:
+            match = pattern.search(text)
+            if match:
+                used_signal_keys.add(sig["key"])
+                line = _matched_line(text, match)
+                records.append(_make_evidence_record(
+                    tool_name,
+                    title=sig["title"],
+                    type_=sig["type"],
+                    confidence=sig["confidence"],
+                    summary=line,
+                    signal=sig["key"],
+                    dedupe_key=f"{sig['key']}:{_normalize_ws(line).lower()[:160]}",
+                ))
+                break
+
+    # trusted 工具兜底：未命中任何具体信号时保留旧版「事实类证据」行为
+    if not records and trusted:
+        records.append({
+            "id": f"evidence-{uuid.uuid4().hex[:12]}",
+            "type": _EVIDENCE_TYPE_BY_TOOL.get(tool_name, "artifact"),
+            "title": _EVIDENCE_TITLE_BY_TOOL.get(tool_name, f"{tool_name} 结果"),
+            "summary": _bounded(text, _SNAPSHOT_SUMMARY_CHARS),
+            "source": tool_name,
+            "confidence": _EVIDENCE_CONFIDENCE_BY_TOOL.get(tool_name, "informational"),
+            "timestamp": int(time.time() * 1000),
+            "metadata": {
+                "tool": tool_name,
+                "success": True,
+                "signal": "generic_fact",
+                "dedupe_key": f"fact:{tool_name}:{_normalize_ws(text).lower()[:160]}",
+            },
+        })
+    return records[:_MAX_EVIDENCE_PER_RESULT]
+
+
+def classify_tool_evidence(tool_name: str, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """兼容入口：返回该工具结果的首条 Evidence（或 None）。
+
+    分层 Gate 见 build_evidence_records：只有「执行成功 + 存在真实有效结果 +
+    不是 error/no-result/timeout」且命中高价值信号（trusted 工具可为通用事实类）
+    才会成为证据。工具类型只是来源资格，不是成立条件。
+    """
+    records = build_evidence_records(tool_name, result)
+    return records[0] if records else None
+
+
+def evidence_dedupe_key(record: Dict[str, Any]) -> str:
+    """证据去重键：优先使用生成时注入的关键值键（Flag/CVE/端口等），否则退化为 source+归一化摘要。"""
+    meta = record.get("metadata") or {}
+    key = meta.get("dedupe_key") if isinstance(meta, dict) else None
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    source = str(record.get("source") or "")
+    summary = _normalize_ws(str(record.get("summary") or "")).lower()[:160]
+    return f"raw:{source}:{summary}"
+
+
+def _normalize_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 def _is_readable_narrative(text: str) -> bool:
@@ -295,11 +533,17 @@ class RunSnapshotRecorder:
         elif event_type == "engine:evidence":
             evidence = data.get("evidence")
             if isinstance(evidence, dict):
-                # 去重：同源 + 同摘要只保留一份
-                if not any(
-                    item.get("source") == evidence.get("source") and item.get("summary") == evidence.get("summary")
+                # 去重：关键值键（Flag/CVE/端口等）相同即视为重复；退化兜底同源+同摘要
+                key = evidence_dedupe_key(evidence)
+                duplicate = any(
+                    evidence_dedupe_key(item) == key
+                    or (
+                        item.get("source") == evidence.get("source")
+                        and item.get("summary") == evidence.get("summary")
+                    )
                     for item in self.evidence
-                ):
+                )
+                if not duplicate:
                     self.evidence.append(evidence)
         elif event_type == "decision:reason":
             decision = data.get("decision")

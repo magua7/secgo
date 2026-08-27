@@ -3,6 +3,7 @@ import type { ConversationPhase, ExecutionState, ExecutionStatus } from '../../t
 import type { PersistedTurn } from '../../types/session'
 import type { RunSnapshot } from '../../types/snapshot'
 import type { MessageAttachment } from '../../types/attachment'
+import { referencesInternalControl, sanitizeTodoItems } from '../../utils/todoDisplay'
 
 const groupTools = (entries: Array<{ name: string; text: string }>): ToolExecutionGroup[] => {
   const groups = new Map<string, string[]>()
@@ -117,7 +118,7 @@ export function snapshotToExecutionState(snapshot: RunSnapshot): ExecutionState 
     status,
     phase,
     activeAgent: snapshot.active_agent ?? 'planner',
-    tasks: snapshot.tasks ?? [],
+    tasks: sanitizeTodoItems(snapshot.tasks ?? []),
     timeline: (snapshot.timeline ?? []).map((item) => ({ ...item })),
     tools: (snapshot.resources ?? []).map((resource) => ({
       name: resource.name,
@@ -146,7 +147,9 @@ export function snapshotToExecutionState(snapshot: RunSnapshot): ExecutionState 
     narrativeUpdates: snapshot.narrative_updates ?? [],
     keyProgress: snapshot.key_progress ?? [],
     report,
-    currentActivity: snapshot.current_activity ?? '',
+    currentActivity: referencesInternalControl(snapshot.current_activity ?? '')
+      ? (status === 'completed' ? '研判完成' : '最终汇报已完成')
+      : snapshot.current_activity ?? '',
     assistantReply: report,
     finalAnswer: report,
     lastAssistantOutput: snapshot.last_assistant_output ?? '',

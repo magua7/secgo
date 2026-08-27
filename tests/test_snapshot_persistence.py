@@ -2,12 +2,24 @@
 
 import unittest
 
-from secgo.runtime.snapshot import classify_tool_evidence
+from secgo.runtime.snapshot import (
+    RunSnapshotRecorder,
+    build_evidence_records,
+    classify_tool_evidence,
+)
 from secgo.web.server import _legacy_turns_from_messages
+
+
+COOKIE_CTF_OUTPUT = (
+    "HTTP/1.1 200 OK\n"
+    "You are logged in as an admin user!\n"
+    "Flag: CTF{cookie_injection_is_fun}"
+)
 
 
 class EvidenceClassificationTests(unittest.TestCase):
     def test_skill_list_and_execute_bash_are_not_evidence(self):
+        # 普通输出（无高价值信号）不因工具名自动成为证据
         self.assertIsNone(classify_tool_evidence("skill_list", {"success": True, "output": "x"}))
         self.assertIsNone(classify_tool_evidence("skill_read", {"success": True, "output": "x"}))
         self.assertIsNone(classify_tool_evidence("execute_bash", {"success": True, "output": "x"}))
@@ -17,9 +29,8 @@ class EvidenceClassificationTests(unittest.TestCase):
         record = classify_tool_evidence("web_search", {"success": True, "output": "found"})
         self.assertIsNotNone(record)
         self.assertEqual(record["source"], "web_search")
-        # mcp_ 前缀不再自动成为证据：工具来源 ≠ 证据成立
+        # mcp_ 前缀不自动成为证据：工具来源 ≠ 证据成立；内容命中安全信号才算
         self.assertIsNone(classify_tool_evidence("mcp_scan", {"success": True, "output": "found"}))
-        self.assertIsNone(classify_tool_evidence("mcp_brave_search", {"success": True, "output": "[medium] XSS"}))
 
     def test_empty_output_is_not_evidence(self):
         self.assertIsNone(classify_tool_evidence("web_search", {"success": True, "output": "(no output)"}))
@@ -35,6 +46,87 @@ class EvidenceClassificationTests(unittest.TestCase):
         record = classify_tool_evidence("port_scan", {"success": True, "output": "80/tcp open\n443/tcp open"})
         self.assertIsNotNone(record)
         self.assertEqual(record["source"], "port_scan")
+
+
+class ExecuteBashEvidenceTests(unittest.TestCase):
+    """验收场景：execute_bash 拿到 Flag 必须生成强证据（不允许报告引用 Flag 而 Evidence=0）。"""
+
+    def test_execute_bash_with_flag_is_confirmed_evidence(self):
+        record = classify_tool_evidence(
+            "execute_bash",
+            {"success": True, "output": COOKIE_CTF_OUTPUT},
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record["source"], "execute_bash")
+        self.assertIn("CTF{cookie_injection_is_fun}", record["summary"])
+        self.assertEqual(record["confidence"], "confirmed")
+        self.assertEqual(record["metadata"]["dedupe_key"], "flag:ctf{cookie_injection_is_fun}")
+
+    def test_cookie_scenario_yields_two_distinct_records(self):
+        records = build_evidence_records(
+            "execute_bash",
+            {"success": True, "output": COOKIE_CTF_OUTPUT},
+        )
+        kinds = [r["metadata"]["signal"] for r in records]
+        # Cookie 权限绕过成功 + Flag 获取成功，两类证据同时成立
+        self.assertIn("auth_privilege", kinds)
+        self.assertIn("flag", kinds)
+        self.assertEqual(len({r["metadata"]["dedupe_key"] for r in records}), len(records))
+
+    def test_execute_bash_plain_ls_is_not_evidence(self):
+        self.assertIsNone(
+            classify_tool_evidence("execute_bash", {"success": True, "output": "README.md\nsrc\ntests"})
+        )
+
+    def test_execute_bash_timeout_is_not_evidence(self):
+        self.assertIsNone(
+            classify_tool_evidence("execute_bash", {"success": False, "error": "Command timed out after 10s."})
+        )
+
+
+class McpEvidenceTests(unittest.TestCase):
+    def test_plain_mcp_success_output_is_not_auto_evidence(self):
+        self.assertIsNone(
+            classify_tool_evidence("mcp_browser_navigate", {"success": True, "output": "Opened https://target.com homepage"})
+        )
+
+    def test_mcp_security_critical_result_is_evidence(self):
+        record = classify_tool_evidence(
+            "mcp_brave_search",
+            {"success": True, "output": "[high] SQL Injection at http://target/api?id=1 — injection verified with payload"},
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record["source"], "mcp_brave_search")
+        self.assertTrue(record["source"].startswith("mcp_"))
+
+
+class McpRegressionTests(unittest.TestCase):
+    """防止旧 Gate 语义回归：mcp 前缀/普通输出继续被拒。"""
+
+    def test_mcp_medium_xss_without_verification_stays_out(self):
+        self.assertIsNone(classify_tool_evidence("mcp_brave_search", {"success": True, "output": "[medium] XSS"}))
+
+
+class EvidenceDedupeUpgradeTests(unittest.TestCase):
+    def test_same_flag_verified_twice_keeps_single_card(self):
+        recorder = RunSnapshotRecorder("s1", run_id="r1")
+        first = classify_tool_evidence("execute_bash", {"success": True, "output": COOKIE_CTF_OUTPUT})
+        second = classify_tool_evidence(
+            "mcp_http_fetch",
+            {"success": True, "output": "GET /admin\n\nWelcome back!\nCTF{cookie_injection_is_fun}\n(done)"},
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first["summary"], second["summary"])  # 摘要不同，旧规则拦不住
+        for record in (first, second):
+            recorder.apply("engine:evidence", {"evidence": record})
+        self.assertEqual(len(recorder.evidence), 1)
+
+    def test_distinct_signals_are_not_merged(self):
+        recorder = RunSnapshotRecorder("s1", run_id="r1")
+        for record in build_evidence_records("execute_bash", {"success": True, "output": COOKIE_CTF_OUTPUT}):
+            recorder.apply("engine:evidence", {"evidence": record})
+        self.assertEqual(len(recorder.evidence), 2)
 
 
 class EvidenceDedupeTests(unittest.TestCase):

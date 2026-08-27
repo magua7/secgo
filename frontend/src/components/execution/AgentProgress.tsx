@@ -19,7 +19,7 @@ export function AgentProgress({ activeAgent, status, participatedAgents = [] }: 
   return <div className="agent-progress">{agents.map((agent) => {
     const isActive = running && agent.id === activeAgent
     const isParticipated = !isActive && participated.has(agent.id)
-    return <div className={`agent-state ${isActive ? 'active' : ''} ${isParticipated ? 'participated' : ''}`} key={agent.id} title={agent.name}>
+    return <div className={`agent-state agent-${agent.id} ${isActive ? 'active' : ''} ${isParticipated ? 'participated' : ''}`} key={agent.id} title={agent.name}>
       <i className="agent-dot" />
       <span>{agent.label}<small>{agent.name}</small></span>
     </div>

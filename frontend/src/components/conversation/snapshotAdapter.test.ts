@@ -25,6 +25,20 @@ const snapshot: RunSnapshot = {
 }
 
 describe('snapshotToExecutionState', () => {
+  it('sanitizes legacy snapshots containing the internal task_complete todo row', () => {
+    const dirty = snapshotToExecutionState({
+      ...snapshot,
+      current_activity: 'planner 正在调用 task_complete',
+      tasks: [
+        { text: '技能路由与技能读取（ctf-solve-mode）', done: true },
+        { text: '最终汇报并 task_complete', done: false },
+      ],
+    })
+    expect(dirty.tasks.map((task) => task.text)).toEqual(['技能路由与技能读取（ctf-solve-mode）'])
+    expect(dirty.completedSteps).toEqual(['技能路由与技能读取（ctf-solve-mode）'])
+    expect(dirty.currentActivity).not.toContain('task_complete')
+  })
+
   it('hydrates terminal status/phase and preserves timeline/evidence/resources', () => {
     const state = snapshotToExecutionState(snapshot)
     expect(state.status).toBe('completed')

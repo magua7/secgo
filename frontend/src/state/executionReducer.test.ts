@@ -159,6 +159,24 @@ describe('executionReducer', () => {
     expect(failed.completedSteps).toContain('侦察')
   })
 
+  it('filters internal control-tool rows out of the todo list and tool stream', () => {
+    let state = executionReducer(initialExecutionState, { type: 'todo:updated', data: { session_id: 's1', todo_list: [
+      { text: '验证假设并提取 flag', done: true },
+      { text: '最终汇报并 task_complete', done: false },
+      { text: '最终汇报（调用 task_complete）', done: true },
+    ] } })
+    expect(state.tasks.map((task) => task.text)).toEqual(['验证假设并提取 flag'])
+    expect(state.completedSteps).toEqual(['验证假设并提取 flag'])
+
+    state = executionReducer(state, { type: 'tool:stream-start', data: { session_id: 's1', agent_id: 'planner', tool_name: 'task_complete', args: {} } })
+    expect(state.currentActivity).not.toContain('task_complete')
+    expect(state.tools).toHaveLength(0)
+    expect(state.timeline.every((item) => !item.title.includes('task_complete'))).toBe(true)
+
+    state = executionReducer(state, { type: 'tool:result', data: { session_id: 's1', tool_name: 'handoff_to_agent', result: '{}' } })
+    expect(state.currentActivity).not.toContain('handoff_to_agent')
+  })
+
   it('derives persistent human-readable progress from real tool results', () => {
     let state = executionReducer(initialExecutionState, { type: 'tool:stream-start', data: { session_id: 's1', tool_name: 'execute_bash', args: {} } })
     state = executionReducer(state, { type: 'tool:stream-end', data: { session_id: 's1', tool_name: 'execute_bash', result: 'Server: nginx; GET /robots.txt 200; /admin 200; /login 200; ASP.NET MVC' } })
