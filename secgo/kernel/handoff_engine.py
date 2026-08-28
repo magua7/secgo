@@ -130,6 +130,77 @@ def _sanitize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 CONTROL_TOOLS = {"handoff_to_agent", "task_complete"}
 
+
+# ── 轻量任务路由提示（纯启发式，零额外 LLM 调用）──────────────
+# 给 Planner 的「路由建议」：根据任务文本特征提示是否值得优先考虑
+# Builder（写脚本/解码/数据处理）或 Research（外部情报/漏洞知识）。
+# 只是建议，最终选 Agent 的仍是 Planner 自己；用于降低
+# 「Operator 先撞墙很久才转」的延迟，绝不强制固定流水线。
+# 简单任务（如端口扫描）通常两类关键词都不命中 → 不给提示，走 Operator 默认。
+
+_ROUTE_BUILDER_PATTERNS = (
+    "poc", "exploit", "exp", "payload", "webshell", "反弹",
+    "脚本", "编写", "写一个", "写个", "构造", "构建",
+    "解码", "编码", "解密", "加密", "base64", "xor", "rc4", "aes",
+    "lsb", "rgb", "像素", "隐写", "stego", "图片", "图像",
+    "批量请求", "批量", "自动化", "数据转换", "解析", "协议",
+    "提取", "生成", "去重", "正则", "二进制", "爆破脚本", "misc",
+)
+_ROUTE_RESEARCH_PATTERNS = (
+    "cve", "已知漏洞", "版本漏洞", "漏洞情报", "安全公告", "公告",
+    "公开poc", "公开exploit", "exploit-db", "nvd", "漏洞库",
+    "不熟悉", "技术文档", "文档", "手册", "原理", "资料",
+    "怎么", "如何", "框架", "组件", "协议", "官方",
+)
+
+
+def _match_route_patterns(text: str, patterns: tuple) -> int:
+    low = text.lower()
+    return sum(1 for p in patterns if p in low)
+
+
+def build_routing_hint(texts) -> str:
+    """根据任务相关文本，给 Planner 返回一条很短的路由建议（可能为空）。
+
+    输入 texts 可以是 goal / current_plan / 最近 user 消息 / TODO 等字符串列表。
+    返回空串 = 不需要特别提示（默认走 Operator）。
+    """
+    combined = " ".join(t for t in texts if isinstance(t, str) and t)
+    if not combined:
+        return ""
+    builder_score = _match_route_patterns(combined, _ROUTE_BUILDER_PATTERNS)
+    research_score = _match_route_patterns(combined, _ROUTE_RESEARCH_PATTERNS)
+    if builder_score == 0 and research_score == 0:
+        return ""
+    if builder_score >= research_score:
+        return (
+            "[路由建议] 本任务疑似需要编写自定义脚本 / PoC / 数据处理逻辑"
+            "（脚本、解码、图像隐写、批量请求等）。可优先考虑交给 Builder 构建，"
+            "再由 Operator 执行验证。最终由你决定。"
+        )
+    return (
+        "[路由建议] 本任务疑似需要外部知识 / 漏洞情报 / 技术资料"
+        "（CVE、版本已知漏洞、公开 PoC、不熟悉的框架或协议等）。"
+        "可优先考虑交给 Research 检索公开情报。最终由你决定。"
+    )
+
+
+def _collect_routing_texts(plan_state, todo_tracker, messages) -> list:
+    """汇总用于路由判断的文本：目标、当前计划、最近几条 user 消息、TODO。"""
+    texts: List[str] = [plan_state.goal, plan_state.current_plan]
+    recent_user: List[str] = []
+    for m in reversed(messages):
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            recent_user.append(m["content"])
+            if len(recent_user) >= 3:
+                break
+    texts.extend(reversed(recent_user))
+    formatted_todo = todo_tracker.get_formatted_todo()
+    if formatted_todo:
+        texts.append(formatted_todo)
+    return texts
+
+
 REPLAN_SYSTEM_PROMPT = """[系统 RePlan 指令]
 
 系统检测到当前执行路径需要重新规划.触发原因: {trigger}.
@@ -141,6 +212,7 @@ REPLAN_SYSTEM_PROMPT = """[系统 RePlan 指令]
 4. 如果方向彻底改变,handoff 给 Planner 重新规划
 
 原计划(将被替换): {current_plan}
+{routing_hint}
 新计划请以 '## 新计划' 开头输出."""
 
 AGENT_PROTOCOL_ERROR = """[Agent Protocol Error]
@@ -410,18 +482,21 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
                 replan_prompt = REPLAN_SYSTEM_PROMPT.format(
                     trigger=replan_trigger["detail"],
                     current_plan=old_plan[:200],  # 原计划（触发前），绝不把新计划误标为「原计划」
+                    routing_hint=build_routing_hint(
+                        _collect_routing_texts(plan_state, todo_tracker, messages)
+                    ) or "",
                 )
                 messages.append({
                     "role": "user",
                     "content": replan_prompt,
                 })
-                # 如果选中的策略目标是 handoff 回 Planner，强制 handoff
+                # 如果选中的策略目标 Agent 不同于当前 Agent（且为合法交接目标），强制切换
                 selected_target = next(
                     (c.target_agent for c in decision.candidates if c.id == decision.selected), None
                 )
-                if selected_target == "planner" and active_agent_id != "planner":
+                if selected_target in ("planner", "research", "builder") and active_agent_id != selected_target:
                     prev_agent_id = active_agent_id
-                    active_agent_id = "planner"
+                    active_agent_id = selected_target
                     event_bus.emit("agent:switch", {
                         "session_id": sid,
                         "from_agent_id": prev_agent_id,
@@ -488,18 +563,27 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
             effective_tools = tools if supports_tools else []
 
             enhanced_system_prompt: Optional[str] = None
+            # 轻量路由建议（仅 Planner）：不额外调用 LLM，只给一句很短的任务性质提示，
+            # 最终选哪个 Agent 由 Planner 自己决定。
+            if agent.id == "planner":
+                routing_hint = build_routing_hint(
+                    _collect_routing_texts(plan_state, todo_tracker, messages)
+                )
+                if routing_hint:
+                    enhanced_system_prompt = agent.system_prompt + "\n\n" + routing_hint
             if not supports_tools and tools:
                 agent_tool_defs = [
                     d for d in all_tool_definitions()
                     if len(d.allowed_agents) == 0 or agent.id in d.allowed_agents
                 ]
                 if agent_tool_defs:
+                    base_prompt = enhanced_system_prompt or agent.system_prompt
                     enhanced_system_prompt = inject_tools_to_prompt(
                         [
                             {"name": d.name, "description": d.description}
                             for d in agent_tool_defs
                         ],
-                        agent.system_prompt,
+                        base_prompt,
                     )
 
             try:

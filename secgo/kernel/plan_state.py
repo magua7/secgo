@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -103,6 +104,13 @@ REPLAN_TRIGGER_MAX_FAILURES = 5                # 累计失败 N 次触发
 
 # failed_attempts 历史保留条数上限：只留最近 N 条（防无限增长），用于告诉 Planner「哪些路径已经失败过」
 MAX_FAILED_ATTEMPTS = 50
+
+# 任务语境里出现「需要脚本/PoC/数据处理」特征时，RePlan 更倾向 Builder
+_SCRIPT_NEED_RE = re.compile(
+    r"(脚本|poc|exploit|编码|解码|加密|解密|payload|lsb|rgb|图像|图片|像素|隐写|"
+    r"批量|数据转换|协议解析|二进制)",
+    re.IGNORECASE,
+)
 
 
 class ReplanDetector:
@@ -341,6 +349,14 @@ class PlanState:
                     risk="medium",
                     expected_outcome="重新规划执行路径",
                 ),
+                CandidateStrategy(
+                    id=f"c{self._candidate_index}-c",
+                    description="构建定制脚本/工具：绕过当前工具限制，用脚本完成目标",
+                    target_agent="builder",
+                    suggested_tools=[],
+                    risk="medium",
+                    expected_outcome="定制化脚本解决当前工具不可用问题",
+                ),
             ]
         elif trigger == "repeated_calls":
             candidates = [
@@ -359,6 +375,14 @@ class PlanState:
                     suggested_tools=["web_search"],
                     risk="low",
                     expected_outcome="获取更多上下文信息",
+                ),
+                CandidateStrategy(
+                    id=f"c{self._candidate_index}-c",
+                    description="构建自定义脚本/自动化：用脚本实现被重复失败工具的功能",
+                    target_agent="builder",
+                    suggested_tools=[],
+                    risk="medium",
+                    expected_outcome="用定制脚本替代重复失败的工具调用",
                 ),
             ]
         elif trigger == "no_progress":
@@ -387,6 +411,14 @@ class PlanState:
                     risk="high",
                     expected_outcome="可能发现此前忽略的攻击面",
                 ),
+                CandidateStrategy(
+                    id=f"c{self._candidate_index}-d",
+                    description="构建定制处理脚本：编写脚本对已有数据做深入解析/自动化分析",
+                    target_agent="builder",
+                    suggested_tools=[],
+                    risk="medium",
+                    expected_outcome="用脚本从已有数据中榨取新信息",
+                ),
             ]
         else:  # excessive_failures / manual
             candidates = [
@@ -411,7 +443,8 @@ class PlanState:
         return candidates
 
     def select_strategy(self, candidates: List[CandidateStrategy], trigger: str,
-                        active_agent_id: str = "", failed_tool: Optional[str] = None) -> Tuple[CandidateStrategy, List[str]]:
+                        active_agent_id: str = "", failed_tool: Optional[str] = None,
+                        script_hint: bool = False) -> Tuple[CandidateStrategy, List[str]]:
         """从候选策略中选择最佳方案。
 
         选择依据与触发原因真正相关（而非无条件 candidates[0]）：
@@ -419,7 +452,8 @@ class PlanState:
         - 避开刚刚失败的同一工具；
         - 当前 Agent 已连续失败时倾向切换 Agent；
         - excessive_failures 时更倾向回退 Planner；
-        - no_progress 时倾向换一个 Agent 获取信息增益。
+        - no_progress 时倾向换一个 Agent 获取信息增益；
+        - script_hint（任务需要脚本/PoC/数据处理）时 Builder 加分。
         """
         if not candidates:
             raise ValueError("No candidates to select from")
@@ -438,6 +472,10 @@ class PlanState:
                 points += 2
             if trigger == "no_progress" and candidate.target_agent != active_agent_id:
                 points += 1
+            if trigger == "repeated_calls" and candidate.target_agent == "research":
+                points += 1
+            if script_hint and candidate.target_agent == "builder":
+                points += 2
             return points
 
         # 原始下标作为稳定 tie-break：分数相同时保留候选声明顺序
@@ -458,12 +496,17 @@ class PlanState:
         previous_plan = self.current_plan  # 保存「原计划」，绝不在记录后再被新计划覆盖
         failed_tool = self.detector.last_failed_tool()
         candidates = self.generate_candidates(trigger, trigger_detail, active_agent_id)
-        selected, rejected = self.select_strategy(candidates, trigger, active_agent_id, failed_tool)
-
         observation = (
             f"原计划: {previous_plan[:100] or '无'}\n"
             f"已失败尝试: {len(self.failed_attempts)} 次\n"
             f"已重规划次数: {self.total_replan_count - 1}"
+        )
+        # 任务语境是否需要「写脚本/PoC」：命中则 Builder 候选加分
+        script_hint = bool(_SCRIPT_NEED_RE.search(
+            " ".join([self.goal, previous_plan, trigger_detail, observation])
+        ))
+        selected, rejected = self.select_strategy(
+            candidates, trigger, active_agent_id, failed_tool, script_hint
         )
 
         decision = DecisionRecord(
