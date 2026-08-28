@@ -16,6 +16,9 @@ const VISION_PROVIDERS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'anthropic', label: 'Anthropic' },
 ]
 
+// 下拉展示 Provider 的可读名称（未识别的 provider 原样显示），不展示订阅默认模型。
+const providerLabel = (provider: string) => VISION_PROVIDERS.find((item) => item.value === provider)?.label ?? provider
+
 const blankVision = (): VisionConfigInput => ({
   enabled: false, mode: 'reuse', subscription: '', modelId: '', provider: 'openai', baseURL: '', apiKey: '',
 })
@@ -160,14 +163,14 @@ export function VisionSettings({ status, onMessage }: { status: KeysStatus | nul
       <div className="vision-status-row"><span>视觉模型</span><span className={`vision-status ${visionBadgeClass}`}>● {visionBadgeText}</span></div>
 
       <div className="vision-mode-toggle" role="radiogroup" aria-label="配置方式">
-        <button type="button" role="radio" aria-checked={visionConfig.mode === 'reuse'} className={`vision-mode-option ${visionConfig.mode === 'reuse' ? 'active' : ''}`} onClick={() => updateVisionConfig({ mode: 'reuse' })}>复用已有订阅</button>
-        <button type="button" role="radio" aria-checked={visionConfig.mode === 'custom'} className={`vision-mode-option ${visionConfig.mode === 'custom' ? 'active' : ''}`} onClick={() => updateVisionConfig({ mode: 'custom' })}>自定义模型</button>
+        <button type="button" role="radio" aria-checked={visionConfig.mode === 'reuse'} className={`vision-mode-option ${visionConfig.mode === 'reuse' ? 'active' : ''}`} onClick={() => updateVisionConfig({ mode: 'reuse' })}>复用模型服务</button>
+        <button type="button" role="radio" aria-checked={visionConfig.mode === 'custom'} className={`vision-mode-option ${visionConfig.mode === 'custom' ? 'active' : ''}`} onClick={() => updateVisionConfig({ mode: 'custom' })}>自定义模型服务</button>
       </div>
 
       {visionConfig.mode === 'reuse' && <>
         <label>模型订阅
           {subscriptions.length > 0
-            ? <select aria-label="模型订阅" value={visionConfig.subscription} onChange={(event) => updateVisionConfig({ subscription: event.target.value })}><option value="">选择订阅…</option>{subscriptions.map((sub) => <option key={sub.name} value={sub.name}>{sub.name} · {sub.provider} · {sub.model}</option>)}</select>
+            ? <select aria-label="模型订阅" value={visionConfig.subscription} onChange={(event) => updateVisionConfig({ subscription: event.target.value })}><option value="">选择订阅…</option>{subscriptions.map((sub) => <option key={sub.name} value={sub.name}>{sub.name} · {providerLabel(sub.provider)}</option>)}</select>
             : <div className="vision-empty"><p>暂无已配置的模型订阅，请先在「默认模型」或「Agent 专用模型」中添加。</p><button type="button" className="text-button" onClick={scrollToModelsTop}>添加模型订阅</button></div>}
           <small className="field-hint">选择已配置的模型服务。</small>
         </label>
@@ -189,10 +192,9 @@ export function VisionSettings({ status, onMessage }: { status: KeysStatus | nul
         </label>
         <label>API Key
           <span className="vision-key-row">
-            <input aria-label="Vision API Key" type={visionKeyVisible ? 'text' : 'password'} value={visionConfig.apiKey ?? ''} onChange={(event) => updateVisionConfig({ apiKey: event.target.value })} placeholder={vision?.has_api_key ? '留空则保留当前已配置密钥' : '输入 API Key'} />
+            <input aria-label="Vision API Key" type={visionKeyVisible ? 'text' : 'password'} value={visionConfig.apiKey ?? ''} onChange={(event) => updateVisionConfig({ apiKey: event.target.value })} placeholder={vision?.has_api_key ? '已配置，留空不修改' : '请输入 API Key'} />
             <button type="button" className="icon-button" aria-label={visionKeyVisible ? '隐藏 API Key' : '显示 API Key'} onClick={() => setVisionKeyVisible((value) => !value)}><Icon name={visionKeyVisible ? 'eyeOff' : 'eye'} /></button>
           </span>
-          <small className="field-hint">{vision?.has_api_key ? '已配置密钥；留空表示沿用当前密钥。' : '首次配置需填写 API Key。'}</small>
         </label>
       </>}
 
@@ -201,7 +203,6 @@ export function VisionSettings({ status, onMessage }: { status: KeysStatus | nul
         <button type="button" className="secondary-button" disabled={visionTesting} onClick={() => void testVision()}>{visionTesting ? '正在测试…' : '测试视觉能力'}</button>
         <button type="button" className="primary-button" onClick={() => void saveVision()}>保存配置</button>
       </div>
-      <p className="field-hint">Vision 使用所选订阅或自定义服务的连接信息与 API Key。</p>
     </div>}
   </div>
 }

@@ -138,7 +138,7 @@ class BudgetContinuityTests(unittest.IsolatedAsyncioTestCase):
             _response("", [_fail_call("probe", "g2")]),
             _response("完成", [_call("task_complete", {"summary": "完成"})]),
         ]
-        result2, manager, _ = await self._run(run2, config, execute_tool=failing_tool, manager=manager)
+        result2, manager, _ = await self._run(run2, config, execute_tool=failing_tool, manager=manager, user_input="继续")
         self.assertEqual(result2["reason"], "completed")
         saved2 = manager.load_state("s-budget")
         # Run 级计数不落库（恒 0），累计计数跨 Run 连续：2 + 1 = 3
@@ -257,7 +257,7 @@ class BudgetContinuityTests(unittest.IsolatedAsyncioTestCase):
             _response("", [_call("handoff_to_agent", {"target_agent_id": "planner", "reason": "研究完成", "task": "汇总"})]),
             _response("- [ ] 全局步骤 A\n- [x] 全局步骤 B", [_call("task_complete", {"summary": "完成"})]),
         ]
-        result, manager, _ = await self._run(responses, config, initial=initial)
+        result, manager, _ = await self._run(responses, config, initial=initial, user_input="继续")
         self.assertEqual(result["reason"], "completed")
         todo_events = [d for event, d in self.events if event == "todo:updated"]
         # 只有 Planner 的一次 TODO 更新，且标注 agent_id

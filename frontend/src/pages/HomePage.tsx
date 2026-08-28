@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
+import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from 'react'
 import type { Theme } from '../hooks/preferences'
-import { handleApiError, sendChat, uploadAttachment } from '../services/api'
+import { handleApiError, sendChat } from '../services/api'
 import { Icon } from '../components/common/Icon'
-import { formatAttachmentSize, releaseAttachmentPreview, toPendingAttachments, type PendingAttachment } from '../types/attachment'
+import { clipboardImageName, formatAttachmentSize } from '../types/attachment'
+import { MAX_ATTACHMENTS_ERROR, useAttachmentUploads } from '../hooks/useAttachmentUploads'
 
 const capabilities = [
   ['domainShield', '恶意域名研判', '深度解析域名注册、解析、历史及关联风险。', '请对这个域名进行完整的恶意域名安全研判：'],
@@ -17,34 +19,36 @@ export function HomePage() {
   const [prompt, setPrompt] = useState('')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
-  const attachmentsRef = useRef<PendingAttachment[]>([])
+  const { files: attachments, addFiles, removeFile, retry, clearFiles, uploading } = useAttachmentUploads()
   const fileRef = useRef<HTMLInputElement>(null)
-  useEffect(() => { attachmentsRef.current = attachments }, [attachments])
-  useEffect(() => () => attachmentsRef.current.forEach(releaseAttachmentPreview), [])
-  const upload = async (attachment: PendingAttachment) => {
-    setAttachments((items) => items.map((item) => item.id === attachment.id ? { ...item, status: 'uploading', error: undefined } : item))
-    try {
-      const uploaded = await uploadAttachment(attachment.file)
-      setAttachments((items) => items.map((item) => item.id === attachment.id ? { ...item, status: 'uploaded', attachmentId: uploaded.id, kind: uploaded.kind, error: undefined } : item))
-    } catch (reason) {
-      setAttachments((items) => items.map((item) => item.id === attachment.id ? { ...item, status: 'error', error: handleApiError(reason) } : item))
-    }
+  const dragDepthRef = useRef(0)
+  const [dragOver, setDragOver] = useState(false)
+  // 拖拽上传：与附件按钮共用同一 upload pipeline（useAttachmentUploads）
+  const onDragEnter = (event: ReactDragEvent<HTMLDivElement>) => { event.preventDefault(); dragDepthRef.current += 1; setDragOver(true) }
+  const onDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) setDragOver(false)
   }
-  const selectFiles = (files: FileList | null) => {
-    attachments.forEach(releaseAttachmentPreview)
-    const selected = toPendingAttachments(files)
-    setAttachments(selected)
-    selected.forEach((attachment) => void upload(attachment))
+  const onDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    dragDepthRef.current = 0
+    setDragOver(false)
+    addFiles(event.dataTransfer?.files ?? null)
   }
-  const removeAttachment = (id: string) => setAttachments((items) => {
-    const target = items.find((item) => item.id === id)
-    if (target) releaseAttachmentPreview(target)
-    return items.filter((item) => item.id !== id)
-  })
+  // 剪贴板粘贴：有文件（截图等）→ 走统一上传；纯文本 Ctrl+V 保持浏览器默认行为
+  const onPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = Array.from(event.clipboardData?.files ?? [])
+    if (!pasted.length) return
+    event.preventDefault()
+    addFiles(pasted.map((file) => {
+      const name = clipboardImageName(file)
+      return name === file.name ? file : new File([file], name, { type: file.type })
+    }))
+  }
   const start = async () => {
     const message = prompt.trim(); if (!message && !attachments.length) return
-    if (attachments.some((attachment) => attachment.status === 'uploading' || attachment.status === 'pending')) { setError('附件仍在上传，请稍候'); return }
+    if (uploading) { setError('附件仍在上传，请稍候'); return }
     if (attachments.some((attachment) => attachment.status === 'error')) { setError('存在上传失败的附件，请删除或重试'); return }
     setSubmitting(true); setError('')
     try {
@@ -52,17 +56,18 @@ export function HomePage() {
       const result = await sendChat(message, undefined, attachments.flatMap((attachment) => attachment.attachmentId ? [attachment.attachmentId] : []))
       sessionStorage.setItem('secgo.sessionId', result.sessionId)
       sessionStorage.setItem('secgo.pendingQuestion', question)
-      attachments.forEach(releaseAttachmentPreview); setAttachments([])
+      clearFiles()
       window.location.hash = '#/workspace'
     } catch (reason) { setError(handleApiError(reason)); setSubmitting(false) }
   }
   return <div className="home-page page-texture" style={{ width: "100%", height: "100%", overflow: "auto" }}>
       <main className="home-main">
       <section className="hero"><span className="eyebrow">MULTI-AGENT SECURITY RESEARCH</span><h1>开始一次安全研判</h1><p>输入域名、IP、Hash、CVE、文件线索或授权安全任务，SEC-GO 将为您组织分析、验证与报告。</p>
-        <div className="hero-composer">
-          <textarea aria-label="安全任务" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="输入域名、IP、Hash、CVE、文件或描述安全任务……" />
-          {attachments.length > 0 && <div className="pending-attachments">{attachments.map((file) => <span key={file.id}>{file.previewUrl && <img src={file.previewUrl} alt={file.name} width="28" height="28" />}{file.name}<small>{formatAttachmentSize(file.size)} · {file.status === 'uploading' ? '上传中' : file.status === 'uploaded' ? '已上传' : file.status === 'error' ? file.error || '上传失败' : '待上传'}</small>{file.status === 'error' && <button type="button" onClick={() => void upload(file)}>重试</button>}<button type="button" aria-label={`删除附件 ${file.name}`} onClick={() => removeAttachment(file.id)}><Icon name="close" /></button></span>)}</div>}
-          <div><span className="hero-tools"><input ref={fileRef} hidden type="file" multiple onChange={(event) => { selectFiles(event.target.files); event.currentTarget.value = '' }} /><button onClick={() => fileRef.current?.click()}><Icon name="paperclip" />附件</button><button onClick={() => setPrompt('请对 example.com 进行恶意域名安全研判，并给出证据与处置建议。')}>▣ 示例任务</button></span><button className="primary-button" onClick={() => void start()} disabled={submitting || attachments.some((attachment) => attachment.status === 'uploading' || attachment.status === 'pending')}>{submitting ? '正在创建…' : '开始任务'} <span>→</span></button></div>
+        <div className={`hero-composer${dragOver ? ' drag-over' : ''}`} onDragEnter={onDragEnter} onDragOver={(event) => event.preventDefault()} onDragLeave={onDragLeave} onDrop={onDrop}>
+          <textarea aria-label="安全任务" value={prompt} onChange={(event) => setPrompt(event.target.value)} onPaste={onPaste} placeholder="输入域名、IP、Hash、CVE、文件或描述安全任务……" />
+          {dragOver && <div className="composer-drop-hint">松开以上传附件</div>}
+          {attachments.length > 0 && <div className="pending-attachments">{attachments.map((file) => <span key={file.id}>{file.previewUrl && <img src={file.previewUrl} alt={file.name} width="28" height="28" />}{file.name}<small>{formatAttachmentSize(file.size)} · {file.status === 'uploading' ? '上传中' : file.status === 'uploaded' ? '已上传' : file.status === 'error' ? file.error || '上传失败' : '待上传'}</small>{file.status === 'error' && file.error !== MAX_ATTACHMENTS_ERROR && <button type="button" onClick={() => retry(file)}>重试</button>}<button type="button" aria-label={`删除附件 ${file.name}`} onClick={() => removeFile(file.id)}><Icon name="close" /></button></span>)}</div>}
+          <div><span className="hero-tools"><input ref={fileRef} hidden type="file" multiple onChange={(event) => { addFiles(event.target.files); event.currentTarget.value = '' }} /><button onClick={() => fileRef.current?.click()}><Icon name="paperclip" />附件</button><button onClick={() => setPrompt('请对 example.com 进行恶意域名安全研判，并给出证据与处置建议。')}>▣ 示例任务</button></span><button className="primary-button" onClick={() => void start()} disabled={submitting || uploading}>{submitting ? '正在创建…' : '开始任务'} <span>→</span></button></div>
         </div>{error && <p className="hero-error">{error}</p>}
       </section>
       <section className="capability-grid">{capabilities.map(([icon, title, desc, preset]) => <button key={title} onClick={() => setPrompt(preset)} aria-label={title}><i className="capability-icon"><Icon name={icon} /></i><h2>{title}</h2><p>{desc}</p><span>→</span></button>)}</section>

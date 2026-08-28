@@ -52,7 +52,7 @@ export function WorkspacePage({ rightVisible, setRightVisible }: WorkspacePagePr
     const attachments = persisted?.userMessage?.attachments
     // 覆盖为真实 turnId：让 ConversationFeed 识别该 turn 为 live（传 onToggleExecution），
     // 从而执行块使用 live executionExpanded（运行中展开），而不是被本地 historyExpanded 缓存成折叠。
-    return { ...liveExecutionToTurn(question, selectedState, attachments), id: liveTurnId }
+    return { ...liveExecutionToTurn(question, selectedState, attachments, selectedId ?? undefined), id: liveTurnId }
   }, [liveTurnId, persistedTurns, selectedState])
   const displayTurns = useMemo(() => {
     if (!liveTurn || !liveTurnId) return mappedTurns

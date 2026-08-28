@@ -58,7 +58,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             context=SimpleNamespace(toolOutputMaxTokens=2000),
         )
 
-    async def _run(self, responses, initial=None, execute_tool=None, session_id="session-1"):
+    async def _run(self, responses, initial=None, execute_tool=None, session_id="session-1", user_input="test"):
         manager = _MemorySessionManager(initial)
         stream = AsyncMock(side_effect=responses)
         tool = execute_tool or AsyncMock(return_value={"success": True, "output": "ok"})
@@ -72,7 +72,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handoff_engine.event_bus, "emit", emitter),
             patch.object(handoff_engine.mcp_client, "is_connected", return_value=False),
         ):
-            result = await handoff_engine.run_engine("test", session_id)
+            result = await handoff_engine.run_engine(user_input, session_id)
         return result, manager, stream, tool
 
     def _completed_events(self):
@@ -110,7 +110,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         result, _, _, _ = await self._run([
             _response("研究摘要", [_call("handoff_to_agent", {"target_agent_id": "planner", "reason": "研究完成", "task": "继续决策"})]),
             _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
-        ], initial)
+        ], initial, user_input="继续")
         self.assertEqual(result["reason"], "completed")
         self.assertTrue(any(event == "agent:switch" and data["to_agent_id"] == "planner" for event, data in self.events))
 
@@ -120,7 +120,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             _response("构建完成", [_call("handoff_to_agent", {"target_agent_id": "operator", "reason": "待验证", "task": "验证脚本"})]),
             _response("验证完成", [_call("handoff_to_agent", {"target_agent_id": "planner", "reason": "验证完成", "task": "汇总"})]),
             _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
-        ], initial)
+        ], initial, user_input="继续")
         self.assertEqual(result["reason"], "completed")
         switches = [data["to_agent_id"] for event, data in self.events if event == "agent:switch"]
         self.assertEqual(switches, ["operator", "planner"])
@@ -130,7 +130,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         result, _, _, _ = await self._run([
             _response("执行摘要", [_call("handoff_to_agent", {"target_agent_id": "planner", "reason": "执行完成", "task": "汇总"})]),
             _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
-        ], initial)
+        ], initial, user_input="继续")
         self.assertEqual(result["reason"], "completed")
         self.assertTrue(any(event == "agent:switch" and data["to_agent_id"] == "planner" for event, data in self.events))
 
@@ -140,7 +140,7 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
             _response("错误完成", [_call("task_complete", {"summary": "不应完成"})]),
             _response("返回 Planner", [_call("handoff_to_agent", {"target_agent_id": "planner", "reason": "权限纠正", "task": "继续"})]),
             _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
-        ], initial)
+        ], initial, user_input="继续")
         self.assertEqual(result["reason"], "completed")
         self.assertEqual(len(self._completed_events()), 1)
         second_messages = stream.await_args_list[1].args[1]
@@ -252,6 +252,50 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         user_contents = [m.get("content") for m in persisted["messages"] if m.get("role") == "user"]
         self.assertTrue(any(isinstance(c, str) and "task" in c for c in user_contents))
         self.assertTrue(any(isinstance(c, str) and "继续" in c for c in user_contents))
+
+    async def test_new_question_after_completed_task_does_not_inherit_task_state(self):
+        # 上一任务已完成（completionSummary）→ 新问题 = 新任务：
+        # 保留对话历史，但绝不继承旧 TODO / planState / activeAgentId。
+        initial = {
+            "activeAgentId": "research",
+            "messages": [{"role": "user", "content": "旧任务输入"}],
+            "stepCount": 7,
+            "todoList": [{"text": "旧任务 TODO", "done": False}],
+            "planState": {"goal": "旧任务目标", "current_plan": "旧计划"},
+            "completionSummary": "旧任务已完成",
+        }
+        result, manager, _, _ = await self._run([
+            _response("新任务完成", [_call("task_complete", {"summary": "新任务完成"})]),
+        ], initial, user_input="分析一个全新的目标")
+        self.assertEqual(result["reason"], "completed")
+        state = manager.state
+        self.assertEqual(state["activeAgentId"], "planner")
+        self.assertEqual(state["todoList"], [])
+        self.assertEqual(state["planState"]["goal"], "分析一个全新的目标")
+        # Conversation History 仍然保留
+        self.assertTrue(any(m.get("content") == "旧任务输入" for m in state["messages"]))
+
+    async def test_continuation_input_restores_unfinished_task_state(self):
+        # 明确「继续」且上一任务未完成 → 恢复 Task State（activeAgentId / planState / TODO）。
+        initial = {
+            "activeAgentId": "research",
+            "messages": [{"role": "user", "content": "旧任务输入"}],
+            "stepCount": 7,
+            "todoList": [{"text": "未完成步骤", "done": False}],
+            "planState": {"goal": "旧任务目标", "current_plan": "旧计划"},
+        }
+        result, manager, _, _ = await self._run([
+            _response("研究完成", [_call("handoff_to_agent", {"target_agent_id": "planner", "reason": "汇总", "task": "收尾"})]),
+            _response("最终结果", [_call("task_complete", {"summary": "完成"})]),
+        ], initial, user_input="继续")
+        self.assertEqual(result["reason"], "completed")
+        # Task State 恢复：从 research agent 继续执行（发生 research → planner 切换）
+        self.assertTrue(any(
+            event == "agent:switch" and data["from_agent_id"] == "research" and data["to_agent_id"] == "planner"
+            for event, data in self.events
+        ))
+        state = manager.state
+        self.assertEqual(state["planState"]["goal"], "旧任务目标")
 
 
 class InputResolverTests(unittest.IsolatedAsyncioTestCase):

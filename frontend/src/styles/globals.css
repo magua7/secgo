@@ -167,3 +167,24 @@
 .mcp-tools li{display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid var(--border-subtle);border-radius:7px;background:var(--bg-surface);color:var(--text-secondary);font:11.5px/1.45 var(--font-mono);overflow-wrap:anywhere}
 .mcp-tools li svg{width:12px;height:12px;flex:0 0 auto;color:var(--text-faint)}
 @media(max-width:760px){.mcp-status-grid{grid-template-columns:1fr}.mcp-tools{grid-template-columns:1fr}}
+
+/* ── 附件统一展示：缩略图 / 类型卡片 / 灯箱；拖拽 & 粘贴上传 ─────────────────── */
+/* 多附件紧凑排布：wrap 行 + 小卡片，不再出现大块灰色占位 */
+.user-attachments{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.attachment-card{display:inline-flex;align-items:center;gap:7px;max-width:100%;padding:6px 9px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--bg-soft);white-space:nowrap}
+.attachment-kind{display:inline-grid;place-items:center;min-width:34px;height:34px;padding:0 5px;border-radius:6px;background:color-mix(in srgb,var(--accent-amber) 12%,var(--bg-surface));color:var(--accent-amber);font:600 9.5px var(--font-mono);letter-spacing:.4px;font-style:normal;flex:0 0 auto}
+.attachment-card-image{padding:5px}
+.attachment-thumb-button{display:block;padding:0;border:0;background:transparent;cursor:zoom-in;line-height:0}
+.attachment-thumb{width:56px;height:56px;object-fit:cover;border-radius:6px;display:block}
+.attachment-meta{color:var(--text-faint);font-size:10px;white-space:nowrap}
+.attachment-analysis{color:var(--text-secondary);font-size:10px;white-space:nowrap}
+.attachment-lightbox{position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:32px;background:color-mix(in srgb,#000 72%,transparent);cursor:zoom-out}
+.attachment-lightbox img{max-width:min(1080px,92vw);max-height:78vh;object-fit:contain;border-radius:10px;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+.attachment-lightbox-close{position:absolute;top:18px;right:20px;display:grid;place-items:center;width:38px;height:38px;border-radius:50%;border:1px solid rgba(255,255,255,.25);background:rgba(0,0,0,.45);color:#fff;cursor:pointer}
+.attachment-lightbox-close svg{width:16px}
+.attachment-lightbox-caption{color:rgba(255,255,255,.85);font-size:12px}
+/* 拖拽高亮 + 「松开以上传附件」提示（Composer 与首页 hero 输入框共用） */
+.composer-wrap{position:relative}
+.hero-composer{position:relative}
+.composer-wrap.drag-over,.hero-composer.drag-over{border-color:var(--accent-amber);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-amber) 30%,transparent)}
+.composer-drop-hint{position:absolute;inset:0;z-index:5;display:grid;place-items:center;border-radius:inherit;background:color-mix(in srgb,var(--accent-amber) 10%,var(--bg-surface) 88%);color:var(--accent-amber);font-weight:600;font-size:13px;pointer-events:none}

@@ -81,6 +81,10 @@ export async function uploadAttachment(file: File): Promise<UploadedAttachment> 
   return result.attachment
 }
 
+// 已上传附件（仅图片）内容地址：用户消息缩略图 / 点击放大预览使用
+export const attachmentImageUrl = (sessionId: string | null | undefined, attachmentId: string): string =>
+  `/api/sessions/${encodeURIComponent(sessionId ?? '')}/attachments/${encodeURIComponent(attachmentId)}/content`
+
 export const sendChat = (message: string, sessionId?: string, attachmentIds?: string[]): Promise<ChatResponse> => apiRequest('/api/chat', {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, sessionId, attachments: attachmentIds ?? [] }),
 })

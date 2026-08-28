@@ -27,7 +27,9 @@ from .vision import (
 def attachment_presentation(metadata, analysis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """附件的展示形态（不含 SHA256/服务器路径等内部信息）。
 
-    image 附件会附带 analysis 字段，让前端展示「视觉分析完成 / 未启用 / 失败」等状态。
+    展示层只携带「附件本身 + 简短状态」：视觉摘要 / 安全发现 / 场景标签等分析内容
+    只进入 Planner 上下文（build_attachment_context）与执行轨迹（attachment:analyzed
+    事件），绝不进入用户消息，避免把系统分析结果伪装成用户输入。
     """
     payload = {
         "id": metadata.attachment_id,
@@ -39,10 +41,6 @@ def attachment_presentation(metadata, analysis: Optional[Dict[str, Any]] = None)
     if analysis is not None:
         payload["analysis"] = {
             "status": analysis.get("status"),
-            "summary": analysis.get("summary"),
-            "securityFindings": analysis.get("security_findings") or [],
-            "sceneTags": analysis.get("scene_tags") or [],
-            "confidence": analysis.get("confidence"),
             "error": analysis.get("error"),
         }
     return payload

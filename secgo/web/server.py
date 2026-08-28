@@ -52,6 +52,8 @@ from ..runtime.attachments import (
     MAX_ATTACHMENTS_PER_TASK,
     MAX_TASK_ATTACHMENT_BYTES,
     cleanup_expired_temporary_attachments,
+    get_session_attachment,
+    get_session_attachment_path,
     get_temporary_attachment,
     move_attachment_to_session,
     save_temporary_attachment,
@@ -843,6 +845,33 @@ async def api_upload_attachment(req: _AttachmentUploadReq,
             "sha256": metadata.sha256,
         },
     })
+
+
+@app.get("/api/sessions/{session_id}/attachments/{attachment_id}/content")
+async def api_attachment_content(session_id: str, attachment_id: str,
+                                 _auth=Depends(require_logged_in)) -> FileResponse:
+    """图片附件内容（仅 image 类型）：供用户消息缩略图与点击放大预览使用。
+
+    统一 404：不区分「不存在 / 非图片 / 非法 ID」，避免暴露资源存在性。
+    """
+    try:
+        if str(uuid.UUID(session_id)) != session_id or str(uuid.UUID(attachment_id)) != attachment_id:
+            raise ValueError
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="attachment not found")
+    metadata = get_session_attachment(session_id, attachment_id)
+    if metadata is None or metadata.detected_kind != "image":
+        raise HTTPException(status_code=404, detail="attachment not found")
+    try:
+        path = get_session_attachment_path(session_id, attachment_id)
+    except (FileNotFoundError, ValueError, OSError):
+        raise HTTPException(status_code=404, detail="attachment not found")
+    safe_name = Path(metadata.original_name).name or "attachment"
+    return FileResponse(
+        path,
+        media_type=metadata.mime_type or "application/octet-stream",
+        filename=safe_name,
+    )
 
 
 # ── 业务 API（全部 require_ready_state）────────────────────

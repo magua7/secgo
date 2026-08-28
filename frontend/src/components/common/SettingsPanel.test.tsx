@@ -191,7 +191,10 @@ describe('SettingsPanel vision settings', () => {
     const select = await screen.findByRole('combobox', { name: '模型订阅' })
     expect(select.tagName).toBe('SELECT')
     expect(select).toHaveValue('coding')
-    expect(screen.getByRole('option', { name: /vision-openai · openai · gpt-4o/ })).toBeInTheDocument()
+    // 下拉只展示 订阅名 · Provider 类型，不再突出该订阅默认 Model ID
+    expect(screen.getByRole('option', { name: 'vision-openai · OpenAI Compatible' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'coding · OpenAI Compatible' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /deepseek-chat|gpt-4o/ })).not.toBeInTheDocument()
   })
 
   it('blocks save when enabled but incomplete and prompts to select subscription and model', async () => {
@@ -245,7 +248,7 @@ describe('SettingsPanel vision settings', () => {
     ))
     render(<SettingsPanel onClose={vi.fn()} />)
 
-    await user.click(await screen.findByRole('radio', { name: '自定义模型' }))
+    await user.click(await screen.findByRole('radio', { name: '自定义模型服务' }))
     expect(screen.getByLabelText('Vision Provider')).toBeInTheDocument()
     expect(screen.getByLabelText('Vision Base URL')).toBeInTheDocument()
     expect(screen.getByLabelText('Vision Model ID')).toBeInTheDocument()
@@ -270,9 +273,36 @@ describe('SettingsPanel vision settings', () => {
     ))
     render(<SettingsPanel onClose={vi.fn()} />)
 
-    await user.click(await screen.findByRole('button', { name: '保存配置' }))
+    expect(await screen.findByLabelText('Vision API Key')).toHaveAttribute('placeholder', '请输入 API Key')
+    await user.click(screen.getByRole('button', { name: '保存配置' }))
     expect(await screen.findByText('请填写 API Key')).toBeInTheDocument()
     expect(apiMocks.saveVisionConfig).not.toHaveBeenCalled()
+  })
+
+  it('shows the configured-key placeholder and saves without retyping the key', async () => {
+    const user = userEvent.setup()
+    apiMocks.getKeysStatus.mockResolvedValue(withVision(
+      visionStatus({ enabled: true, mode: 'custom', model_id: 'qwen-vl-max', provider: 'openai', base_url: 'https://v.example/v1', has_api_key: true, status: 'verified', configured: true }),
+    ))
+    render(<SettingsPanel onClose={vi.fn()} />)
+
+    const keyInput = await screen.findByLabelText('Vision API Key')
+    expect(keyInput).toHaveAttribute('placeholder', '已配置，留空不修改')
+    expect(screen.queryByText('已配置密钥；留空表示沿用当前密钥。')).not.toBeInTheDocument()
+    expect(screen.queryByText('留空则保留当前已配置密钥')).not.toBeInTheDocument()
+    // 已配置过 Key：留空直接保存即可，不重复要求填写
+    await user.click(screen.getByRole('button', { name: '保存配置' }))
+    await waitFor(() => expect(apiMocks.saveVisionConfig).toHaveBeenCalledTimes(1))
+    expect(apiMocks.saveVisionConfig).toHaveBeenCalledWith(expect.objectContaining({ apiKey: '' }))
+  })
+
+  it('does not render the duplicated vision description footer', async () => {
+    apiMocks.getKeysStatus.mockResolvedValue(withVision(
+      visionStatus({ enabled: true, mode: 'reuse', subscription: 'coding', model_id: 'gpt-4o', status: 'pending', configured: true }),
+    ))
+    render(<SettingsPanel onClose={vi.fn()} />)
+    await screen.findByRole('combobox', { name: '模型订阅' })
+    expect(screen.queryByText(/连接信息与 API Key/)).not.toBeInTheDocument()
   })
 
   it('sends provider/baseURL/modelId/apiKey when saving a custom config', async () => {

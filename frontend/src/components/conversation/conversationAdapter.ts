@@ -43,6 +43,7 @@ export function hasAgentTaskSignals(state: ExecutionState): boolean {
 
 interface NormalizedTurnInput {
   id: string
+  sessionId?: string
   userText: string
   attachments?: MessageAttachment[]
   phase: ConversationPhase
@@ -56,6 +57,7 @@ export function normalizeConversationTurn(input: NormalizedTurnInput): Conversat
   const kind = input.hasTaskSignals ? 'agent_task' : 'direct_response'
   return {
     id: input.id,
+    sessionId: input.sessionId,
     kind,
     phase: kind === 'direct_response' && input.phase !== 'awaiting_user' ? 'direct_response' : input.phase,
     userMessage: { text: input.userText, attachments: input.attachments },
@@ -83,7 +85,7 @@ export function executionToPresentation(state: ExecutionState): ExecutionPresent
   }
 }
 
-export function liveExecutionToTurn(question: string, state: ExecutionState, attachments?: MessageAttachment[]): ConversationTurn {
+export function liveExecutionToTurn(question: string, state: ExecutionState, attachments?: MessageAttachment[], sessionId?: string): ConversationTurn {
   const task = hasAgentTaskSignals(state)
   const directText = state.assistantReply || state.finalAnswer || state.report
   const taskText = state.phase === 'awaiting_user'
@@ -94,7 +96,7 @@ export function liveExecutionToTurn(question: string, state: ExecutionState, att
         ? state.finalAnswer
         : ''
   return normalizeConversationTurn({
-    id: 'live-turn', userText: question, attachments, phase: state.phase, hasTaskSignals: task, execution: executionToPresentation(state),
+    id: 'live-turn', sessionId, userText: question, attachments, phase: state.phase, hasTaskSignals: task, execution: executionToPresentation(state),
     assistantText: task ? taskText : directText,
     isFinalStreaming: Boolean((!task && state.status === 'running' && directText) || (task && state.phase === 'reporting' && taskText)),
   })
@@ -179,6 +181,7 @@ export function persistedTurnToConversationTurn(turn: PersistedTurn): Conversati
   if (!turn.execution) {
     return {
       id: turn.id,
+      sessionId: turn.sessionId,
       kind: 'direct_response',
       phase: 'idle',
       userMessage: { text: userText, attachments },
@@ -191,6 +194,7 @@ export function persistedTurnToConversationTurn(turn: PersistedTurn): Conversati
   const hasTaskSignals = hasAgentTaskSignals(state)
   return normalizeConversationTurn({
     id: turn.id,
+    sessionId: turn.sessionId,
     userText,
     attachments,
     phase: state.phase,

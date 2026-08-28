@@ -39,6 +39,34 @@ from .pipeline import (
 logger = logging.getLogger("secgo.session")
 
 
+# ── 「明确继续」语义（纯启发式，绝不为此新增 LLM 调用）──────────────
+# 只有整体就是继续意图的短输入才算继续；携带新问题/新目标的输入一律视为新任务。
+_CONTINUATION_PHRASES = frozenset({
+    "继续", "继续吧", "继续执行", "继续任务", "继续刚才的任务", "继续之前的任务",
+    "继续刚才的方案", "继续按原计划", "接着做", "接着做吧", "接着干", "接着来",
+    "接着执行", "请继续", "请接着做", "按刚才方案继续", "按照刚才方案继续",
+    "按之前的方案继续", "按原方案继续", "按原计划继续", "按刚才的计划继续",
+    "依照刚才的方案继续", "continue", "pleasecontinue", "goon", "goonwiththetask",
+    "keepgoing", "keepgoingwiththetask", "resume", "resumethetask",
+})
+_CONTINUATION_MAX_LEN = 24
+_CONTINUATION_STRIP_CHARS = "，。！？?!.、；;：: \t\n\r'\"“”‘’（）()[]{}【】吧呗啦呢哦呀啊了"
+
+
+def is_continuation_input(user_input: str) -> bool:
+    """判断输入是否为「明确继续」类短语（如：继续 / 接着做 / 按刚才方案继续）。
+
+    判定规则：整体（去空白/标点/语气词后）必须恰好等于一个继续短语，
+    因此「继续分析这个新文件」这类携带新信息的输入不会误判为继续。
+    """
+    if not user_input:
+        return False
+    text = user_input.strip().lower()
+    if not text or len(text) > _CONTINUATION_MAX_LEN:
+        return False
+    return "".join(ch for ch in text if ch not in _CONTINUATION_STRIP_CHARS) in _CONTINUATION_PHRASES
+
+
 def _save_state_with_retry(manager: SessionManager, session_id: str, state: Dict[str, Any], attempts: int = 3) -> bool:
     """关键执行状态落库:失败必须可见(log + 重试 + persistence:warning),绝不静默吞掉."""
     last: Optional[Exception] = None
@@ -240,25 +268,29 @@ async def run_engine(user_input: str, session_id: Optional[str] = None) -> Dict[
     # 视为新任务——保留 conversation messages，但重置执行控制状态（PlanState/TODO/
     # detector/active goal），避免旧任务的 Plan、failed_attempts、detector 污染新任务。
     previous_task_completed = bool(saved_state and saved_state.get("completionSummary"))
+    # Conversation History ≠ Task Execution State：
+    # - 明确「继续」（继续 / 接着做 / 按刚才方案继续…）且上一任务未完成 → 恢复
+    #   TODO/PlanState/activeAgentId 等 Task State；
+    # - 其余输入（尤其上一任务已完成时）一律视为新任务：只保留对话历史，
+    #   Task State 全部从干净状态开始，绝不继承旧 TODO/current_plan/active_agent/
+    #   transient detector state/unfinished execution control state。
+    resume_task_state = not previous_task_completed and is_continuation_input(user_input)
     # 审计口径：之前所有 Run 的累计 token（不参与硬限制）
     total_token_count = int(saved_state.get("tokenCount", 0)) if saved_state else 0
 
     plan_state = PlanState(goal=user_input[:500])
     if saved_state is not None:
-        plan_data = saved_state.get("planState")
-        if plan_data and not previous_task_completed:
-            plan_state = PlanState.from_serializable(plan_data)
-        active_agent_id = saved_state.get("activeAgentId", "planner")
+        if resume_task_state:
+            plan_data = saved_state.get("planState")
+            if plan_data:
+                plan_state = PlanState.from_serializable(plan_data)
+            active_agent_id = saved_state.get("activeAgentId", "planner")
+            todo_list = saved_state.get("todoList")
+            if todo_list:
+                todo_tracker.restore(list(todo_list))
+        # 对话历史与审计步数跨任务保留（属于 Conversation History / 审计数据，不属于 Task State）
         messages = list(saved_state.get("messages") or [])
         total_step_count = int(saved_state.get("stepCount", 0))
-        todo_list = saved_state.get("todoList")
-        if todo_list and not previous_task_completed:
-            todo_tracker.restore(list(todo_list))
-
-    if previous_task_completed:
-        # 新任务：执行控制状态全部从干净状态开始（goal 已随全新 PlanState 初始化）
-        active_agent_id = "planner"
-        todo_tracker = TodoTracker()
 
     # 每次 Run 都重新获得 Run 级额度：清 run_replan_count / exhaustion_notice /
     # detector 触发窗口；goal、计划、失败历史、决策历史等 Task State 全部保留。

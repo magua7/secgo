@@ -36,7 +36,7 @@ export interface PendingAttachment {
   error?: string
 }
 
-export const toPendingAttachments = (files: FileList | null): PendingAttachment[] =>
+export const toPendingAttachments = (files: FileList | File[] | null): PendingAttachment[] =>
   Array.from(files ?? []).map((file, index) => ({
     id: `${file.name}-${file.lastModified}-${index}`,
     file,
@@ -46,6 +46,19 @@ export const toPendingAttachments = (files: FileList | null): PendingAttachment[
     status: 'pending',
     previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
   }))
+
+// 与后端 MAX_ATTACHMENTS_PER_TASK 保持一致（一次任务最多 8 个不重复附件）
+export const MAX_ATTACHMENTS = 8
+
+// 粘贴截图的 Blob 通常没有合适文件名（image.png / blob / 空名）→ 生成可读文件名
+export const clipboardImageName = (file: File, now: Date = new Date()): string => {
+  const generic = !file.name || file.name === 'blob' || /^image\.[a-z0-9]+$/i.test(file.name)
+  if (!generic) return file.name
+  const subtype = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png'
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  return `截图-${stamp}.${subtype}`
+}
 
 export function releaseAttachmentPreview(attachment: PendingAttachment): void {
   if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl)

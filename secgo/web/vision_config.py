@@ -23,11 +23,13 @@ from ..runtime.vision import (
 )
 
 # Vision 自定义模式内部使用的专用订阅名（保留 ID，前缀 __ 避免与用户订阅冲突）：
-# 不暴露给用户，也不出现在「复用已有订阅」下拉里。
+# 不暴露给用户，也不出现在「复用模型服务」下拉里。
 VISION_SUBSCRIPTION_NAME = "__vision_custom__"
 
-# 保存配置后强制回到「待验证」：verified 只能由后端 /api/vision-test 真实测试成功后写入，
+# 重置为「待验证」所需写入的字段：verified 只能由后端 /api/vision-test 真实测试成功后写入，
 # 客户端不能通过提交 test_status 等字段自行声明已验证。
+# 仅当影响 Vision Target / Credential 的配置实际变化时才应用本重置；
+# 配置无变化的重复保存保留既有验证状态（判定见 _vision_target_changed）。
 VISION_TEST_RESET = {"tested_identity": "", "test_status": "pending", "test_message": "", "tested_at": None}
 
 
@@ -126,13 +128,49 @@ def _build_temp_vision_target(req: VisionTestRequest) -> tuple[Optional[VisionTa
     ), None
 
 
+def _vision_target_changed(
+    existing: Dict[str, Any],
+    *,
+    mode: str,
+    subscription: str,
+    model_id: str,
+    provider: str = "",
+    base_url: str = "",
+    api_key: str = "",
+) -> bool:
+    """判断本次保存是否改变了影响 Vision Target / Credential 的实际配置。
+
+    对比维度：vision 节的 mode/subscription/modelId；custom 模式还包含专用订阅的
+    provider/baseURL/apiKey（api_key 传入前已按「留空沿用旧 Key」语义归一）。
+    reuse 模式下 provider/baseURL/Key 均来自所选订阅，不经本接口变化，无需对比。
+    只有实际变化才应把已验证状态重置为「待验证」。
+    """
+    vision = existing.get("vision") or {}
+    if str(vision.get("mode") or "") != mode:
+        return True
+    if str(vision.get("subscription") or "") != subscription:
+        return True
+    if str(vision.get("modelId") or "") != model_id:
+        return True
+    if mode != "custom":
+        return False
+    sub = (existing.get("subscriptions") or {}).get(VISION_SUBSCRIPTION_NAME) or {}
+    if str(sub.get("provider") or "openai") != provider:
+        return True
+    if str(sub.get("baseURL") or "") != base_url:
+        return True
+    return str(sub.get("apiKey") or "") != api_key
+
+
 def save_vision_config(req: VisionConfigRequest) -> JSONResponse:
     """保存图片视觉（Vision）配置。
 
-    - mode=reuse：复用已有订阅，仅记 enabled + subscription + modelId；
+    - mode=reuse：复用所选订阅的连接信息（provider/baseURL/apiKey），仅记 enabled + subscription + modelId；
     - mode=custom：在 subscriptions 中创建/更新一条专用订阅（provider/baseURL/apiKey/modelId），
       vision 节只记 mode/subscription/modelId；apiKey 留空表示沿用已保存 Key。
-    保存不做能力检测；能力检测由 /api/vision-test 独立触发。任何保存都回到「待验证」。
+    保存不做能力检测；能力检测由 /api/vision-test 独立触发。
+    仅当影响 Vision Target / Credential 的配置实际变化时才回到「待验证」；
+    配置完全不变的重复保存保留既有验证状态（verified 只能由后端真实测试写入）。
     """
     mode = (req.mode or "reuse").strip()
     model_id = (req.modelId or "").strip()
@@ -143,20 +181,28 @@ def save_vision_config(req: VisionConfigRequest) -> JSONResponse:
         existing = {}
 
     if not req.enabled:
-        err = _persist_vision_settings(existing, {
-            "enabled": False, "mode": mode,
-            "subscription": (req.subscription or "").strip(), "modelId": model_id,
-            **VISION_TEST_RESET,
-        })
+        # custom 模式统一记内部专用订阅 ID，保证关闭/重开后对比口径一致。
+        sub_name = VISION_SUBSCRIPTION_NAME if mode == "custom" else (req.subscription or "").strip()
+        # 关闭 Vision 不改写专用订阅，专用订阅的对比基线取当前已存值（即视为不变）。
+        provider = base_url = api_key = ""
+        if mode == "custom":
+            saved_custom = (existing.get("subscriptions") or {}).get(VISION_SUBSCRIPTION_NAME) or {}
+            provider = str(saved_custom.get("provider") or "openai")
+            base_url = str(saved_custom.get("baseURL") or "")
+            api_key = str(saved_custom.get("apiKey") or "")
+        vision_update: Dict[str, Any] = {"enabled": False, "mode": mode, "subscription": sub_name, "modelId": model_id}
+        if _vision_target_changed(
+            existing, mode=mode, subscription=sub_name, model_id=model_id,
+            provider=provider, base_url=base_url, api_key=api_key,
+        ):
+            vision_update.update(VISION_TEST_RESET)
+        err = _persist_vision_settings(existing, vision_update)
         if err:
             return JSONResponse({"ok": False, "saved": False, "error": err}, status_code=500)
         return JSONResponse({"ok": True, "saved": True})
 
     if not model_id:
         return JSONResponse({"ok": False, "saved": False, "error": "请填写视觉模型（Model ID）"}, status_code=400)
-
-    # 任何配置保存（含首次、修改、切换模式）都回到「待验证」。
-    vision_update: Dict[str, Any] = {"enabled": True, "mode": mode, "modelId": model_id, **VISION_TEST_RESET}
 
     if mode == "custom":
         provider = (req.provider or "openai").strip() or "openai"
@@ -168,10 +214,16 @@ def save_vision_config(req: VisionConfigRequest) -> JSONResponse:
         effective_key = api_key or str(saved_custom.get("apiKey") or "")
         if not effective_key:
             return JSONResponse({"ok": False, "saved": False, "error": "请填写 API Key"}, status_code=400)
+        changed = _vision_target_changed(
+            existing, mode="custom", subscription=VISION_SUBSCRIPTION_NAME, model_id=model_id,
+            provider=provider, base_url=base_url, api_key=effective_key,
+        )
+        vision_update = {"enabled": True, "mode": mode, "modelId": model_id, "subscription": VISION_SUBSCRIPTION_NAME}
+        if changed:
+            vision_update.update(VISION_TEST_RESET)
         subs_update = {VISION_SUBSCRIPTION_NAME: {
             "provider": provider, "baseURL": base_url, "modelId": model_id, "apiKey": effective_key,
         }}
-        vision_update["subscription"] = VISION_SUBSCRIPTION_NAME
         err = _write_subscriptions_and_vision(existing, subs_update, vision_update)
     else:
         sub_name = (req.subscription or "").strip()
@@ -184,7 +236,10 @@ def save_vision_config(req: VisionConfigRequest) -> JSONResponse:
                 {"ok": False, "saved": False, "error": f"订阅 {sub_name} 不存在或未配置完整"},
                 status_code=400,
             )
-        vision_update["subscription"] = sub_name
+        changed = _vision_target_changed(existing, mode="reuse", subscription=sub_name, model_id=model_id)
+        vision_update = {"enabled": True, "mode": "reuse", "modelId": model_id, "subscription": sub_name}
+        if changed:
+            vision_update.update(VISION_TEST_RESET)
         err = _persist_vision_settings(existing, vision_update)
 
     if err:

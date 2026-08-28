@@ -41,26 +41,158 @@ class WebVisionConfigTests(unittest.TestCase):
         self.assertNotIn("tested_identity", vision_config.VisionConfigRequest.model_fields)
         self.assertNotIn("tested_at", vision_config.VisionConfigRequest.model_fields)
 
-    def test_save_resets_verification_to_pending(self):
-        initial = {
+    # ── verified 保留规则：配置实际变化才重置为 pending ──────────
+
+    def _verified_custom_state(self) -> dict:
+        return {
             "subscriptions": {
                 "__vision_custom__": {"provider": "openai", "baseURL": "https://x/v1", "modelId": "qwen-vl-max", "apiKey": "k"},
             },
             "vision": {
                 "enabled": True, "mode": "custom", "subscription": "__vision_custom__", "modelId": "qwen-vl-max",
                 "tested_identity": "openai::https://x/v1::qwen-vl-max", "test_status": "verified",
-                "test_message": "", "tested_at": 123,
+                "test_message": "ok", "tested_at": 123,
             },
         }
+
+    def _verified_reuse_state(self) -> dict:
+        return {
+            "subscriptions": {},
+            "vision": {
+                "enabled": True, "mode": "reuse", "subscription": "coding", "modelId": "qwen-vl-max",
+                "tested_identity": "openai::https://coding.example/v1::qwen-vl-max", "test_status": "verified",
+                "test_message": "", "tested_at": 456,
+            },
+        }
+
+    def _assert_kept_verified(self, saved: dict) -> None:
+        self.assertEqual(saved["vision"]["test_status"], "verified")
+        self.assertEqual(saved["vision"]["tested_identity"], "openai::https://x/v1::qwen-vl-max"
+                         if saved["vision"]["mode"] == "custom" else "openai::https://coding.example/v1::qwen-vl-max")
+        self.assertEqual(saved["vision"]["tested_at"], 123 if saved["vision"]["mode"] == "custom" else 456)
+
+    def _assert_reset_to_pending(self, saved: dict) -> None:
+        self.assertEqual(saved["vision"]["test_status"], "pending")
+        self.assertEqual(saved["vision"]["tested_identity"], "")
+        self.assertIsNone(saved["vision"].get("tested_at"))
+
+    def _call_config_with_subs(self, settings: dict, req, subscriptions):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = Path(temp_dir) / "settings.json"
+            settings_file.write_text(json.dumps(settings), encoding="utf-8")
+            with (
+                patch.object(vision_config, "SETTINGS_FILE", settings_file),
+                patch.object(vision_config, "reset_config"),
+                patch.object(vision_config, "get_config", return_value=_cfg(subscriptions=subscriptions)),
+            ):
+                response = asyncio.run(server.api_vision_config(req))
+            saved = server.parse_jsonc(settings_file.read_text(encoding="utf-8")) or {}
+            return response, saved
+
+    def test_save_identical_custom_config_keeps_verified(self):
         req = vision_config.VisionConfigRequest(
             enabled=True, mode="custom", provider="openai", baseURL="https://x/v1",
             modelId="qwen-vl-max", apiKey="k",
         )
-        response, saved = self._call_config(initial, req)
+        response, saved = self._call_config(self._verified_custom_state(), req)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(saved["vision"]["test_status"], "pending")
-        self.assertEqual(saved["vision"]["tested_identity"], "")
-        self.assertIsNone(saved["vision"].get("tested_at"))
+        self._assert_kept_verified(saved)
+
+    def test_save_blank_key_with_unchanged_config_keeps_verified(self):
+        req = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="openai", baseURL="https://x/v1",
+            modelId="qwen-vl-max", apiKey="",
+        )
+        response, saved = self._call_config(self._verified_custom_state(), req)
+        self.assertEqual(response.status_code, 200)
+        self._assert_kept_verified(saved)
+        self.assertEqual(saved["subscriptions"]["__vision_custom__"]["apiKey"], "k")
+
+    def test_save_changed_model_id_resets_to_pending(self):
+        req = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="openai", baseURL="https://x/v1",
+            modelId="qwen-vl-max-2", apiKey="k",
+        )
+        response, saved = self._call_config(self._verified_custom_state(), req)
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+        self.assertEqual(saved["vision"]["modelId"], "qwen-vl-max-2")
+
+    def test_save_changed_base_url_resets_to_pending(self):
+        req = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="openai", baseURL="https://y/v1",
+            modelId="qwen-vl-max", apiKey="k",
+        )
+        response, saved = self._call_config(self._verified_custom_state(), req)
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+        self.assertEqual(saved["subscriptions"]["__vision_custom__"]["baseURL"], "https://y/v1")
+
+    def test_save_changed_provider_resets_to_pending(self):
+        req = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="anthropic", baseURL="https://x/v1",
+            modelId="qwen-vl-max", apiKey="k",
+        )
+        response, saved = self._call_config(self._verified_custom_state(), req)
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+
+    def test_save_replaced_api_key_resets_to_pending(self):
+        req = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="openai", baseURL="https://x/v1",
+            modelId="qwen-vl-max", apiKey="brand-new-key",
+        )
+        response, saved = self._call_config(self._verified_custom_state(), req)
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+        self.assertEqual(saved["subscriptions"]["__vision_custom__"]["apiKey"], "brand-new-key")
+
+    def test_save_changed_mode_resets_to_pending(self):
+        req = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="openai", baseURL="https://z/v1",
+            modelId="qwen-vl-max", apiKey="zk",
+        )
+        response, saved = self._call_config(self._verified_reuse_state(), req)
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+
+    def test_reuse_save_identical_keeps_verified(self):
+        sub = SimpleNamespace(provider="openai", baseURL="https://coding.example/v1", modelId="deepseek-chat", apiKey="coding-key")
+        req = vision_config.VisionConfigRequest(enabled=True, mode="reuse", subscription="coding", modelId="qwen-vl-max")
+        response, saved = self._call_config_with_subs(self._verified_reuse_state(), req, {"coding": sub})
+        self.assertEqual(response.status_code, 200)
+        self._assert_kept_verified(saved)
+
+    def test_reuse_save_changed_model_resets_to_pending(self):
+        sub = SimpleNamespace(provider="openai", baseURL="https://coding.example/v1", modelId="deepseek-chat", apiKey="coding-key")
+        req = vision_config.VisionConfigRequest(enabled=True, mode="reuse", subscription="coding", modelId="other-vl-max")
+        response, saved = self._call_config_with_subs(self._verified_reuse_state(), req, {"coding": sub})
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+
+    def test_reuse_save_changed_subscription_resets_to_pending(self):
+        sub = SimpleNamespace(provider="openai", baseURL="https://other.example/v1", modelId="deepseek-chat", apiKey="other-key")
+        req = vision_config.VisionConfigRequest(enabled=True, mode="reuse", subscription="coding2", modelId="qwen-vl-max")
+        response, saved = self._call_config_with_subs(self._verified_reuse_state(), req, {"coding2": sub})
+        self.assertEqual(response.status_code, 200)
+        self._assert_reset_to_pending(saved)
+        self.assertEqual(saved["vision"]["subscription"], "coding2")
+
+    def test_disable_then_reenable_unchanged_keeps_verified(self):
+        req_off = vision_config.VisionConfigRequest(enabled=False, mode="custom", subscription="", modelId="qwen-vl-max")
+        response, saved = self._call_config(self._verified_custom_state(), req_off)
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(saved["vision"]["enabled"], False)
+        self._assert_kept_verified(saved)
+
+        req_on = vision_config.VisionConfigRequest(
+            enabled=True, mode="custom", provider="openai", baseURL="https://x/v1",
+            modelId="qwen-vl-max", apiKey="",
+        )
+        response, saved = self._call_config(saved, req_on)
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(saved["vision"]["enabled"], True)
+        self._assert_kept_verified(saved)
 
     def test_real_backend_test_persists_verified(self):
         sub = SimpleNamespace(provider="openai", baseURL="https://v.example/v1", modelId="qwen-vl-max", apiKey="k")

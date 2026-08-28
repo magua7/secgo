@@ -37,6 +37,7 @@ export interface ExecutionPresentation {
 
 export interface ConversationTurn {
   id: string
+  sessionId?: string
   kind: 'direct_response' | 'agent_task'
   phase: ConversationPhase
   userMessage: { text: string; attachments?: MessageAttachment[] }
