@@ -72,10 +72,8 @@ const progressFromTool = (name: string, result: string) => {
   const labels = capabilityLabels(`${name} ${result}`)
   if (name === 'skill_list') progress.push(labels.length ? `已匹配${labels.join('、')}能力` : '已匹配当前任务所需安全能力')
   if (name === 'skill_read') progress.push(labels.length ? `已加载${labels.join('、')}执行指引` : '已加载所选安全测试执行指引')
-  if (/asp\.net\s*(mvc)?/i.test(result)) progress.push('已识别目标使用 ASP.NET MVC 技术栈')
   const endpoints = ['/admin', '/login', '/api', '/swagger', '/actuator'].filter((path) => result.toLowerCase().includes(path))
   if (endpoints.length) progress.push(`发现 ${endpoints.join('、')} 等入口`)
-  if (/robots\.txt/i.test(result) || /server\s*:/i.test(result) || /x-powered-by/i.test(result)) progress.push('已获取 robots.txt、HTTP 响应头或页面技术特征')
   const malicious = result.match(/malicious\s*[:=]\s*(\d+)/i)
   if (malicious) progress.push(`${name} 检出 ${malicious[1]} 个恶意判定`)
   return progress

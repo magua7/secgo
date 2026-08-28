@@ -144,12 +144,17 @@ _AUTH_BOOT_ID = secrets.token_urlsafe(32)
 
 
 def _web_credentials() -> tuple:
-    """从 settings.json web 节动态读取 Web 凭据（惰性单例，避免模块加载时序问题）。"""
+    """Web 凭据：优先使用 settings.json web 节的 admin_password_hash / admin_password；
+    两者都未配置时回落固定演示密码（仅开发便利），避免部署后无法登录。"""
     web = get_config().web
+    password_hash = (getattr(web, "adminPasswordHash", "") or "").strip()
+    password_plain = (getattr(web, "adminPassword", "") or "").strip()
+    if not password_hash and not password_plain:
+        password_hash, password_plain = FIXED_WEB_PASSWORD_HASH, ""
     return (
         web.secretKey or "dev-insecure-secret-change-me-xxxxxxxxxxxxxxxxx",
-        FIXED_WEB_PASSWORD_HASH,
-        "",
+        password_hash,
+        password_plain,
     )
 
 

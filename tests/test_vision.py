@@ -214,6 +214,16 @@ class VisionCapabilityTests(unittest.TestCase):
         png = _make_test_png()
         self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_make_test_png_is_large_enough_for_min_size_models(self):
+        """部分视觉模型对图片最小尺寸有硬限制（实测 qwen 系拒绝 8x8，16x16 起通过）。
+        内置测试图必须足够大，否则能力检测会对本支持图片的模型误报「不支持图片」。"""
+        png = _make_test_png()
+        width = int.from_bytes(png[16:20], "big")
+        height = int.from_bytes(png[20:24], "big")
+        self.assertGreaterEqual(width, 16)
+        self.assertGreaterEqual(height, 16)
+        self.assertLess(len(png), 4096)  # 纯色小图必须保持极小体积
+
     def test_capability_verified(self):
         with patch("secgo.runtime.vision._call_vision_model", new=AsyncMock(return_value="红色方块")):
             result = _run(run_vision_test(_target()))

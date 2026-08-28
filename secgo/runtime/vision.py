@@ -363,8 +363,13 @@ async def analyze_attachment_image(path: Path, filename: str, mime_type: str) ->
 # ── 能力检测（内置测试图，不依赖用户上传）────────────────────────
 
 
-def _make_test_png(width: int = 8, height: int = 8, rgb: tuple = (220, 40, 40)) -> bytes:
-    """生成一个纯色方块 PNG（内置测试图，8x8 红色），用于验证 provider 是否接受图片输入。"""
+def _make_test_png(width: int = 64, height: int = 64, rgb: tuple = (220, 40, 40)) -> bytes:
+    """生成一个纯色方块 PNG（内置测试图，默认 64x64 红色），用于验证 provider 是否接受图片输入。
+
+    注意：必须足够大。部分视觉模型（如通义千问 qwen-vl 系列）对图片最小尺寸有硬限制
+    （实测 qwen3.8-max 拒绝 8x8，16x16 起才通过）；8x8 会导致能力检测误报「不支持图片」。
+    64x64 纯色 PNG 压缩后仅几百字节，既安全又极小。
+    """
     def chunk(typ: bytes, data: bytes) -> bytes:
         payload = struct.pack(">I", len(data)) + typ + data
         payload += struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)

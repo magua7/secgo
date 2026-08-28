@@ -145,7 +145,7 @@ async def build_attachment_context(session_id: str, attachments: list) -> tuple[
             f"- 大小: {metadata.size} bytes",
             f"- SHA-256: {metadata.sha256}",
         ]
-        if metadata.detected_kind in ("text", "pdf", "zip"):
+        if metadata.detected_kind in ("text", "pdf", "zip", "pcap"):
             extracted = extract_limited_text(
                 get_session_attachment_path(session_id, metadata.attachment_id),
                 detected_kind=metadata.detected_kind,

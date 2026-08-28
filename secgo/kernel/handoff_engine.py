@@ -145,12 +145,18 @@ _ROUTE_BUILDER_PATTERNS = (
     "lsb", "rgb", "像素", "隐写", "stego", "图片", "图像",
     "批量请求", "批量", "自动化", "数据转换", "解析", "协议",
     "提取", "生成", "去重", "正则", "二进制", "爆破脚本", "misc",
+    # 英文任务名（如 "write a script to decode ..."）
+    "script", "decode", "encode", "decrypt", "encrypt", "pixel",
+    "reverse shell", "brute force", "image", "fuzz",
 )
 _ROUTE_RESEARCH_PATTERNS = (
     "cve", "已知漏洞", "版本漏洞", "漏洞情报", "安全公告", "公告",
     "公开poc", "公开exploit", "exploit-db", "nvd", "漏洞库",
     "不熟悉", "技术文档", "文档", "手册", "原理", "资料",
     "怎么", "如何", "框架", "组件", "协议", "官方",
+    # 英文任务名（如 "find known vulnerabilities for ..."）
+    "known vulnerability", "known vulnerabilities", "security advisory",
+    "advisory", "public exploit", "documentation",
 )
 
 

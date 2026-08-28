@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..config.config import PROJECT_ROOT
+from .pcap_analysis import analyze_pcap_bytes, format_pcap_summary
 from .workspace import get_workspace_base
 
 UPLOADS_BASE = PROJECT_ROOT / "runtime" / "uploads"
@@ -345,10 +346,17 @@ def _looks_like_text(data: bytes) -> bool:
 
 
 def extract_limited_text(path: Path, detected_kind: str = "text") -> Optional[str]:
-    """根据文件类型提取文本内容。支持 PDF/ZIP/JSON/YAML/OpenAPI/纯文本。"""
+    """根据文件类型提取文本内容。支持 PDF/ZIP/JSON/YAML/OpenAPI/PCAP/纯文本。"""
     # PDF 专用解析
     if detected_kind == "pdf":
         return _try_extract_pdf_text(path)
+
+    # PCAP 流量包解析
+    if detected_kind == "pcap":
+        try:
+            return format_pcap_summary(analyze_pcap_bytes(path.read_bytes()))
+        except Exception as exc:
+            return f"[PCAP 解析失败] {exc}"
 
     # ZIP 专用解析
     if detected_kind == "zip":

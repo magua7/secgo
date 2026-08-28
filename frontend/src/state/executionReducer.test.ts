@@ -179,12 +179,19 @@ describe('executionReducer', () => {
 
   it('derives persistent human-readable progress from real tool results', () => {
     let state = executionReducer(initialExecutionState, { type: 'tool:stream-start', data: { session_id: 's1', tool_name: 'execute_bash', args: {} } })
-    state = executionReducer(state, { type: 'tool:stream-end', data: { session_id: 's1', tool_name: 'execute_bash', result: 'Server: nginx; GET /robots.txt 200; /admin 200; /login 200; ASP.NET MVC' } })
-    expect(state.keyProgress.join(' ')).toContain('ASP.NET MVC')
+    state = executionReducer(state, { type: 'tool:stream-end', data: { session_id: 's1', tool_name: 'execute_bash', result: 'GET /robots.txt 200; /admin 200; /login 200' } })
     expect(state.keyProgress.join(' ')).toContain('/admin')
     state = executionReducer(state, { type: 'engine:end', data: { session_id: 's1', reason: 'completed', total_steps: 3 } })
     state = executionReducer(state, { type: 'ui:toggle-execution', data: {} })
     expect(state.keyProgress.join(' ')).toContain('/admin')
+  })
+
+  it('does not fabricate tech-stack findings from keyword mentions in tool output', () => {
+    // 结果文本里 merely 提到 ASP.NET / Server: 不再产生「已识别技术栈」伪进展条目
+    let state = executionReducer(initialExecutionState, { type: 'tool:stream-start', data: { session_id: 's1', tool_name: 'skill_read', args: {} } })
+    state = executionReducer(state, { type: 'tool:stream-end', data: { session_id: 's1', tool_name: 'skill_read', result: '技能文档中提到 ASP.NET MVC 与 Server: 响应头示例，不代表目标特征' } })
+    expect(state.keyProgress.join(' ')).not.toContain('已识别目标使用')
+    expect(state.keyProgress.join(' ')).not.toContain('已获取 robots.txt')
   })
 })
 

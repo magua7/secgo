@@ -79,6 +79,18 @@ class RoutingHintUnitTests(unittest.TestCase):
         hint = handoff_engine.build_routing_hint(["这个框架怎么用，查询技术文档"])
         self.assertIn("Research", hint)
 
+    def test_english_script_task_hints_builder(self):
+        hint = handoff_engine.build_routing_hint(["Write a Python script to decode the payload"])
+        self.assertIn("Builder", hint)
+
+    def test_english_known_vuln_task_hints_research(self):
+        hint = handoff_engine.build_routing_hint(["Find known vulnerabilities in Apache 2.4.49"])
+        self.assertIn("Research", hint)
+
+    def test_english_scan_task_has_no_hint(self):
+        hint = handoff_engine.build_routing_hint(["Scan 192.168.1.1 open ports"])
+        self.assertEqual(hint, "")
+
     def test_simple_scan_task_has_no_hint(self):
         hint = handoff_engine.build_routing_hint(["扫描目标 192.168.1.1 的开放端口"])
         self.assertEqual(hint, "")
