@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from ..config.config import McpServerConfig
 
-MCP_CALL_TIMEOUT_S = 15
+MCP_CALL_TIMEOUT_S = 60
 
 try:
     from mcp import ClientSession, StdioServerParameters
@@ -15,6 +15,15 @@ try:
     _MCP_AVAILABLE = True
 except Exception:  # mcp 包缺失或版本不兼容
     _MCP_AVAILABLE = False
+
+
+def _tool_input_schema(tool: Any) -> Dict[str, Any]:
+    """兼容 mcp 1.x（inputSchema）与 2.x（input_schema）的 Tool 属性名。"""
+    for attr in ("input_schema", "inputSchema"):
+        value = getattr(tool, attr, None)
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 class McpClientManager:
@@ -42,41 +51,43 @@ class McpClientManager:
         if server_name in self._servers:
             return
 
+        transport_cm: Any = None
         try:
+            # sse_client / stdio_client 返回的是 async context manager，
+            # 必须先进入上下文才能拿到 (read, write) 流——不能直接解包。
             if server.type == "sse" and server.url:
-                read, write = sse_client(server.url)
+                transport_cm = sse_client(server.url)
             else:
                 params = StdioServerParameters(
                     command=server.command,
                     args=list(server.args),
                     env=dict(server.env) if server.env else None,
                 )
-                read, write = stdio_client(params)
+                transport_cm = stdio_client(params)
+            read, write = await transport_cm.__aenter__()
 
-            await read.__aenter__()
+            session_cm: Any = ClientSession(read, write)
+            session = await session_cm.__aenter__()
             try:
-                await write.__aenter__()
+                await session.initialize()
             except Exception:
-                await read.__aexit__(None, None, None)
+                await session_cm.__aexit__(None, None, None)
                 raise
-            session = ClientSession(read, write)
-            await session.__aenter__()
-            await session.initialize()
 
             tools_result = await session.list_tools()
             tools = [
                 {
                     "name": t.name,
                     "description": t.description or "",
-                    "input_schema": (t.inputSchema or {}) if isinstance(t.inputSchema, dict) else {},
+                    "input_schema": _tool_input_schema(t),
                 }
                 for t in tools_result.tools
             ]
 
             self._servers[server_name] = {
                 "session": session,
-                "read": read,
-                "write": write,
+                "session_cm": session_cm,
+                "transport_cm": transport_cm,
                 "tools": tools,
             }
             for tool in tools:
@@ -86,6 +97,12 @@ class McpClientManager:
                 }
             print(f'[MCP] 已连接服务器 "{server_name}"（{len(tools)} 个工具）')
         except Exception as err:
+            # 连接中途失败：回滚已进入的 transport 上下文，避免泄漏子进程/连接
+            if transport_cm is not None:
+                try:
+                    await transport_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
             print(f'[MCP] 连接服务器 "{server_name}" 失败: {err}')
 
     def get_tools(self) -> List[Dict[str, Any]]:
@@ -135,19 +152,19 @@ class McpClientManager:
         self._servers.clear()
         self._tool_routes.clear()
         for entry in entries:
-            try:
-                session = entry["session"]
-                await session.__aexit__(None, None, None)
-            except Exception:
-                pass
-            try:
-                await entry["write"].__aexit__(None, None, None)
-            except Exception:
-                pass
-            try:
-                await entry["read"].__aexit__(None, None, None)
-            except Exception:
-                pass
+            # 退出顺序：先会话、再传输（stdio/sse 的子进程与连接随 transport 关闭）
+            session_cm = entry.get("session_cm")
+            if session_cm is not None:
+                try:
+                    await session_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+            transport_cm = entry.get("transport_cm")
+            if transport_cm is not None:
+                try:
+                    await transport_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
 
 
 mcp_client = McpClientManager()
