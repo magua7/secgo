@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..config.config import PROJECT_ROOT
+from .binary_analysis import analyze_binary_bytes, format_binary_summary
 from .pcap_analysis import analyze_pcap_bytes, format_pcap_summary
 from .workspace import get_workspace_base
 
@@ -357,6 +358,13 @@ def extract_limited_text(path: Path, detected_kind: str = "text") -> Optional[st
             return format_pcap_summary(analyze_pcap_bytes(path.read_bytes()))
         except Exception as exc:
             return f"[PCAP 解析失败] {exc}"
+
+    # ELF/PE 二进制解析
+    if detected_kind in ("elf", "pe"):
+        try:
+            return format_binary_summary(analyze_binary_bytes(path.read_bytes(), detected_kind))
+        except Exception as exc:
+            return f"[二进制解析失败] {exc}"
 
     # ZIP 专用解析
     if detected_kind == "zip":

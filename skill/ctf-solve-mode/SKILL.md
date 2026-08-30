@@ -66,6 +66,10 @@ state-changing HTTP methods, browser rendering, or payload automation. When a
 hypothesis depends on one of these operations, record the exact missing
 capability and leave the criterion unsatisfied.
 
+Note: lightweight ELF/PE header parsing and printable-string extraction (via
+`binary_analysis`, injected into the attachment context) are available for
+uploaded binaries, but that is not disassembly or execution — those remain gaps.
+
 ## Result record
 
 Return structured fields:

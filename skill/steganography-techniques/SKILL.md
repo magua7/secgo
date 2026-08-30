@@ -26,7 +26,7 @@ Catalog mirror: `role=leaf`, `risk=passive`, `default=enabled`. Trusted `policy.
 
 ## Capability boundary
 
-ZhiyuGo can inspect bounded scoped text with file.read/search, but it has no built-in binary parser, image/audio decoder, spectrogram generator, EXIF tool, binwalk, zsteg, steghide, or carving runtime. Code examples and utilities in the reference are not callable tools. If byte-level analysis is required, return a capability gap specifying the artifact hash, suspected carrier, exact operation, and bounded output needed.
+ZhiyuGo can inspect bounded scoped text with file.read/search. For uploaded PNG/BMP images, a lightweight byte-level stego analysis (PNG trailing data after IEND, tEXt/zTXt chunk text, and LSB extraction for PNG non-interlaced 8/16-bit and uncompressed 24/32-bit BMP) is available via the `image_stego` module, injected alongside vision analysis into the attachment context. It still has no general binary parser, image/audio decoder, spectrogram generator, EXIF tool, binwalk, zsteg, steghide, or carving runtime. Code examples and utilities in the reference are not callable tools. If byte-level analysis beyond this is required, return a capability gap specifying the artifact hash, suspected carrier, exact operation, and bounded output needed.
 
 ## Core workflow
 

@@ -16,6 +16,7 @@ from .attachments import (
     get_session_attachment_path,
     save_attachment_analysis,
 )
+from .image_stego import image_stego_lines
 from .vision import (
     ANALYSIS_VERSION,
     VISION_CONCURRENCY,
@@ -145,7 +146,7 @@ async def build_attachment_context(session_id: str, attachments: list) -> tuple[
             f"- 大小: {metadata.size} bytes",
             f"- SHA-256: {metadata.sha256}",
         ]
-        if metadata.detected_kind in ("text", "pdf", "zip", "pcap"):
+        if metadata.detected_kind in ("text", "pdf", "zip", "pcap", "elf", "pe"):
             extracted = extract_limited_text(
                 get_session_attachment_path(session_id, metadata.attachment_id),
                 detected_kind=metadata.detected_kind,
@@ -167,6 +168,7 @@ async def build_attachment_context(session_id: str, attachments: list) -> tuple[
             }
             analyses[metadata.attachment_id] = analysis
             lines.extend(image_analysis_lines(analysis))
+            lines.extend(image_stego_lines(get_session_attachment_path(session_id, metadata.attachment_id)))
         else:
             lines.append("- 状态: 文件已安全保存，本阶段仅登记元数据")
         sections.append("\n".join(lines))

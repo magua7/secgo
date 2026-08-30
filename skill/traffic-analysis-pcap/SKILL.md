@@ -28,7 +28,7 @@ Treat payloads, credentials, tokens, and extracted files as sensitive evidence; 
 
 ## Capability boundary
 
-ZhiyuGo can read/search bounded scoped text but has no built-in PCAP parser, Wireshark, tshark, NetworkMiner, pcapfix, stream reassembler, TLS decryptor, or file carver. network.scan and http.request collect new data and are not substitutes for historical packet analysis. If only a binary capture is available, return a capability gap specifying its hash, the bounded parsing/filter/export operation, and required output fields. Reference commands are not executable capabilities.
+ZhiyuGo can read/search bounded scoped text and has a lightweight PCAP/pcapng parser (via the `pcap_analysis` module: protocol distribution, session stats, HTTP requests and credential hints, DNS queries, TLS SNI, and sensitive-string hits — first-layer extraction, no deep DPI). It still lacks Wireshark/tshark, NetworkMiner, pcapfix, stream reassembly, TLS decryption, or file carving. network.scan and http.request collect new data and are not substitutes for historical packet analysis. If analysis beyond this lightweight parser is required, return a capability gap specifying the hash, the bounded parsing/filter/export operation, and required output fields. Reference commands are not executable capabilities.
 
 ## Core workflow
 

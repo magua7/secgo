@@ -29,7 +29,7 @@ Catalog mirror: `role=leaf`, `risk=passive`, `default=enabled`. Trusted `policy.
 
 ## Capability boundary
 
-ZhiyuGo can inspect bounded scoped textual code and prior evidence through file.read/search/code.search. It has no built-in binary loader, IDA/Ghidra, debugger, emulator, tracer, symbolic solver, or script runtime. If opcode extraction, execution, or solver work cannot be performed from supplied textual evidence, return a capability gap with exact offsets, bytes/state required, and a concrete validation plan. Reference scripts are not executable tools.
+ZhiyuGo can inspect bounded scoped textual code and prior evidence through file.read/search/code.search. For uploaded ELF/PE binaries, a lightweight header parser (class/endianness/type/machine/entry point/section names) plus printable-string extraction (ASCII + UTF-16LE) and flag/URL/path scanning is available via the `binary_analysis` module, routed through `extract_limited_text`'s elf/pe branch into the attachment context. It still has no full binary loader, IDA/Ghidra, debugger, emulator, tracer, symbolic solver, or script runtime — header/string extraction is not disassembly. If opcode extraction, execution, or solver work cannot be performed from supplied textual evidence, return a capability gap with exact offsets, bytes/state required, and a concrete validation plan. Reference scripts are not executable tools.
 
 ## Core workflow
 
