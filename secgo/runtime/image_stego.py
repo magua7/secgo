@@ -28,6 +28,7 @@ STEGO_MAX_STRINGS = 40         # LSB 里保留的可打印字符串条数
 STEGO_MIN_STR_LEN = 4          # 字符串最小长度
 STEGO_TRAILING_MAX = 512       # 尾随数据展示上限
 STEGO_TEXT_LIMIT = 4 * 1024    # 注入上下文文本上限
+STEGO_MAX_PIXEL_BYTES = 64 * 1024 * 1024  # 解压/读取的像素字节上限（防解压炸弹）
 
 _FLAG_RE = re.compile(rb"flag\{[^}\r\n]{1,80}\}", re.IGNORECASE)
 _ASCII_STR_RE = re.compile(rb"[\x20-\x7e]{%d,}" % STEGO_MIN_STR_LEN)
@@ -176,8 +177,16 @@ def _png_lsb(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Option
         return None, f"color_type {color_type} 不支持"
     bpp = channels * (bit_depth // 8)
     row_bytes = ihdr["width"] * bpp
+    stride = 1 + row_bytes
+    expected = ihdr["height"] * stride
 
-    # 拼接所有 IDAT 并解压
+    # 防解压炸弹：按 IHDR 声明尺寸在解压前拦截超大图
+    if expected <= 0:
+        return None, "无效的图片尺寸"
+    if expected > STEGO_MAX_PIXEL_BYTES:
+        return None, f"图片尺寸过大（{expected} 字节），跳过 LSB 提取"
+
+    # 拼接所有 IDAT 并解压（max_length 兜底，防畸形流解压出超声明尺寸的数据）
     idat_parts: List[bytes] = []
     for ctype, cdata in _iter_png_chunks(data):
         if ctype == b"IDAT":
@@ -185,15 +194,17 @@ def _png_lsb(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Option
     if not idat_parts:
         return None, "无 IDAT 数据"
     try:
-        raw = zlib.decompress(b"".join(idat_parts))
+        d = zlib.decompressobj()
+        raw = d.decompress(b"".join(idat_parts), STEGO_MAX_PIXEL_BYTES + 1)
+        if len(raw) > STEGO_MAX_PIXEL_BYTES:
+            return None, "解压数据过大，跳过 LSB 提取"
     except zlib.error:
         return None, "IDAT 解压失败"
 
-    # 逐行还原 filter，得到原始像素字节
-    stride = 1 + row_bytes
-    expected = ihdr["height"] * stride
     if len(raw) < expected:
         return None, "解压数据不完整"
+
+    # 逐行还原 filter，得到原始像素字节
     pixels = bytearray()
     prev = b""
     for r in range(ihdr["height"]):
@@ -204,7 +215,8 @@ def _png_lsb(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Option
         pixels.extend(row)
         prev = row
 
-    return _extract_lsb(bytes(pixels)), None
+    # LSB 扫描只用到前 STEGO_LSB_SCAN 字节，像素只需前 8 倍即可，避免全量位运算
+    return _extract_lsb(bytes(pixels[: STEGO_LSB_SCAN * 8])), None
 
 
 def _png_chunk_texts(data: bytes) -> List[str]:
@@ -273,6 +285,7 @@ def _analyze_bmp(data: bytes) -> Dict[str, Any]:
     row_size = width * (bpp // 8)
     stride = (row_size + 3) & ~3  # 每行 4 字节对齐
     rows = abs(height)
+    max_pixel_bytes = STEGO_LSB_SCAN * 8
     pixels = bytearray()
     for r in range(rows):
         start = bf_off_bits + r * stride
@@ -280,8 +293,10 @@ def _analyze_bmp(data: bytes) -> Dict[str, Any]:
         if end > len(data):
             break
         pixels.extend(data[start:end])
+        if len(pixels) >= max_pixel_bytes:
+            break  # LSB 扫描只用到前 STEGO_LSB_SCAN 字节，提前停止
 
-    result["lsb"] = _extract_lsb(bytes(pixels))
+    result["lsb"] = _extract_lsb(bytes(pixels[:max_pixel_bytes]))
     return result
 
 

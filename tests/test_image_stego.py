@@ -119,6 +119,12 @@ class ImageStegoParseTests(unittest.TestCase):
         result = analyze_image_stego(_make_png(_ihdr(8, 8, color_type=3), b"x"))
         self.assertIn("palette", result["lsb_note"])
 
+    def test_png_huge_dimensions_rejected(self):
+        # 声明超大 height（解压后约 4 亿字节），应在解压前被尺寸上限拦截，避免解压炸弹
+        result = analyze_image_stego(_make_png(_ihdr(1, 100_000_000), zlib.compress(b"\x00\x00\x00\x00")))
+        self.assertIsNotNone(result)
+        self.assertIn("过大", result["lsb_note"])
+
     def test_unsupported_format_returns_none(self):
         self.assertIsNone(analyze_image_stego(b"\xff\xd8\xff\xe0" + b"\x00" * 20))  # JPEG
         self.assertIsNone(analyze_image_stego(b"GIF89a" + b"\x00" * 20))
