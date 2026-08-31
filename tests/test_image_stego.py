@@ -77,6 +77,75 @@ def _make_png_with_text(text: bytes) -> bytes:
     return _make_png(_ihdr(1, 1), idat, extra=_chunk(b"tEXt", tex))
 
 
+def _make_png_with_itxt(text: bytes, compressed: bool = False) -> bytes:
+    idat = zlib.compress(b"\x00" + b"\x00\x00\x00")
+    text_data = zlib.compress(text) if compressed else text
+    comp_flag = 1 if compressed else 0
+    itxt = b"Comment\x00" + bytes([comp_flag, 0]) + b"\x00\x00" + text_data
+    return _make_png(_ihdr(1, 1), idat, extra=_chunk(b"iTXt", itxt))
+
+
+_ADAM7 = ((0, 0, 8, 8), (0, 4, 8, 8), (4, 0, 8, 4), (0, 2, 4, 4), (2, 0, 4, 2), (0, 1, 2, 2), (1, 0, 2, 1))
+
+
+def _make_palette_lsb_png(message: bytes, width: int = 32, height: int = 8, bit_depth: int = 1) -> bytes:
+    """palette 索引图：索引值 bit0 藏 message bit。"""
+    bits = "".join(f"{b:08b}" for b in message)
+    indices = [1 if ch == "1" else 0 for ch in bits][:width * height]
+    indices.extend([0] * (width * height - len(indices)))
+    per_byte = 8 // bit_depth
+    raw = b""
+    for r in range(height):
+        row_bytes = bytearray()
+        for i in range(0, width, per_byte):
+            byte = 0
+            for j in range(per_byte):
+                if i + j < width:
+                    byte = (byte << bit_depth) | indices[r * width + i + j]
+            row_bytes.append(byte)
+        raw += b"\x00" + bytes(row_bytes)
+    plte = b"\x00\x00\x00" * (1 << bit_depth)
+    return _make_png(_ihdr(width, height, bit_depth=bit_depth, color_type=3), zlib.compress(raw), extra=_chunk(b"PLTE", plte))
+
+
+def _make_interlaced_lsb_png(message: bytes, width: int = 8, height: int = 8) -> bytes:
+    """Adam7 interlaced RGB 图：按 7 pass 顺序生成 raw，像素 LSB 藏 message。"""
+    bits = "".join(f"{b:08b}" for b in message)
+    full = bytearray(width * height * 3)
+    for i, ch in enumerate(bits):
+        if ch == "1":
+            full[i] |= 1
+    raw = b""
+    for start_x, start_y, step_x, step_y in _ADAM7:
+        if width <= start_x or height <= start_y:
+            continue
+        pass_w = (width - start_x + step_x - 1) // step_x
+        pass_h = (height - start_y + step_y - 1) // step_y
+        for py in range(pass_h):
+            row = bytearray()
+            for px in range(pass_w):
+                tx = start_x + px * step_x
+                ty = start_y + py * step_y
+                src = (ty * width + tx) * 3
+                row += full[src:src + 3]
+            raw += b"\x00" + bytes(row)
+    return _make_png(_ihdr(width, height, interlace=1), zlib.compress(raw))
+
+
+def _make_lsb_png_16bit(message: bytes, width: int = 8, height: int = 8) -> bytes:
+    """16 位深 RGB：每个 16-bit 样本的低字节 bit0 藏 message bit。"""
+    bits = "".join(f"{b:08b}" for b in message)
+    pixels = bytearray(width * height * 6)
+    for i, ch in enumerate(bits):
+        if ch == "1":
+            pixels[i * 2 + 1] |= 1
+    raw = b""
+    for r in range(height):
+        row = bytes(pixels[r * width * 6:(r + 1) * width * 6])
+        raw += b"\x00" + row
+    return _make_png(_ihdr(width, height, bit_depth=16), zlib.compress(raw))
+
+
 # ── 解析用例 ───────────────────────────────────────────────
 
 
@@ -111,12 +180,34 @@ class ImageStegoParseTests(unittest.TestCase):
         result = analyze_image_stego(_make_png_with_text(b"flag{in_comment_chunk}"))
         self.assertEqual(result["chunk_texts"], ["flag{in_comment_chunk}"])
 
-    def test_png_interlaced_unsupported(self):
-        result = analyze_image_stego(_make_png(_ihdr(8, 8, interlace=1), b"x"))
-        self.assertIn("interlaced", result["lsb_note"])
+    def test_png_interlaced_lsb(self):
+        msg = b"flag{adam7_lsb}"
+        result = analyze_image_stego(_make_interlaced_lsb_png(msg))
+        self.assertIsNotNone(result)
+        self.assertIn(msg, result["lsb"])
 
-    def test_png_palette_unsupported(self):
-        result = analyze_image_stego(_make_png(_ihdr(8, 8, color_type=3), b"x"))
+    def test_png_palette_lsb(self):
+        msg = b"flag{palette_lsb}"
+        result = analyze_image_stego(_make_palette_lsb_png(msg))
+        self.assertIsNotNone(result)
+        self.assertIn(msg, result["lsb"])
+
+    def test_png_itxt_chunk(self):
+        result = analyze_image_stego(_make_png_with_itxt(b"flag{in_itxt_chunk}"))
+        self.assertIn("flag{in_itxt_chunk}", result["chunk_texts"])
+
+    def test_png_itxt_compressed(self):
+        result = analyze_image_stego(_make_png_with_itxt(b"flag{itxt_zlib}", compressed=True))
+        self.assertIn("flag{itxt_zlib}", result["chunk_texts"])
+
+    def test_png_16bit_lsb(self):
+        msg = b"flag{16bit_lsb}"
+        result = analyze_image_stego(_make_lsb_png_16bit(msg))
+        self.assertIn(msg, result["lsb"])
+
+    def test_png_interlaced_palette_still_gap(self):
+        # interlaced + palette + bit_depth<8 组合仍标不支持
+        result = analyze_image_stego(_make_png(_ihdr(8, 8, bit_depth=1, color_type=3, interlace=1), b"x"))
         self.assertIn("palette", result["lsb_note"])
 
     def test_png_huge_dimensions_rejected(self):
@@ -156,8 +247,9 @@ class ImageStegoIntegrationTests(unittest.TestCase):
         self.assertTrue(any("flag{via_lines}" in line for line in lines))
 
     def test_image_stego_lines_unsupported_returns_empty(self):
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as handle:
-            handle.write(b"\xff\xd8\xff\xe0" + b"\x00" * 20)
+        # WEBP：classify 识别为 image，但本模块无结构解析/隐写覆盖，应返回空
+        with tempfile.NamedTemporaryFile(suffix=".webp", delete=False) as handle:
+            handle.write(b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 20)
             path = Path(handle.name)
         try:
             lines = image_stego_lines(path)

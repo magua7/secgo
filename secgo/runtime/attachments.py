@@ -304,6 +304,8 @@ def classify_basic_file(data: bytes) -> str:
         return "image"
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image"
+    if data.startswith(b"BM"):
+        return "image"
     if data.startswith(b"%PDF-"):
         return "pdf"
     if len(data) >= 4 and data[:2] == b"PK" and data[2:4] in (b"\x03\x04", b"\x05\x06", b"\x07\x08"):

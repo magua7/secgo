@@ -151,6 +151,8 @@ def _normalize_image_mime(filename: str, mime_type: str, head: bytes) -> str:
         return "image/gif"
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "image/webp"
+    if head.startswith(b"BM"):
+        return "image/bmp"
     if mime_type and mime_type.startswith("image/"):
         return mime_type
     return "image/png"

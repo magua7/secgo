@@ -22,6 +22,9 @@ import zlib
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from .gif_analysis import analyze_gif_bytes, format_gif_summary
+from .jpeg_analysis import analyze_jpeg_bytes, format_jpeg_summary
+
 # ── 上限（防止大图拖垮上下文）──────────────────────────────
 STEGO_LSB_SCAN = 4 * 1024      # LSB 字节流扫 flag/字符串的字节上限
 STEGO_MAX_STRINGS = 40         # LSB 里保留的可打印字符串条数
@@ -35,6 +38,16 @@ _ASCII_STR_RE = re.compile(rb"[\x20-\x7e]{%d,}" % STEGO_MIN_STR_LEN)
 
 _PNG_SIG = b"\x89PNG\r\n\x1a\n"
 _PNG_COLOR_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}  # 灰度/RGB/palette/灰alpha/RGBA
+# Adam7 交错 7 个 pass 的 (起始 x, 起始 y, x 步长, y 步长)
+_ADAM7_PASSES = (
+    (0, 0, 8, 8),
+    (0, 4, 8, 8),
+    (4, 0, 8, 4),
+    (0, 2, 4, 4),
+    (2, 0, 4, 2),
+    (0, 1, 2, 2),
+    (1, 0, 2, 1),
+)
 
 
 # ── PNG 结构解析 ──────────────────────────────────────────
@@ -161,30 +174,38 @@ def _lsb_scan(lsb: bytes) -> Dict[str, Any]:
 # ── PNG 分析 ──────────────────────────────────────────────
 
 
-def _png_lsb(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Optional[str]]:
-    """解 IDAT + 还原 filter + 取 LSB。返回 (lsb 字节, 不支持原因或 None)。"""
-    color_type = ihdr["color_type"]
-    if color_type == 3:
-        return None, "palette 索引图不支持 LSB 提取"
-    if ihdr["interlace"] != 0:
-        return None, "interlaced(Adam7) 不支持 LSB 提取"
-    bit_depth = ihdr["bit_depth"]
-    if bit_depth not in (8, 16):
-        return None, f"位深 {bit_depth} 不支持 LSB 提取"
-
+def _png_bpp(color_type: int, bit_depth: int) -> Optional[int]:
+    """PNG 滤波的每像素字节数；bit_depth<8 时按 1 字节处理。"""
+    if bit_depth < 8:
+        return 1
     channels = _PNG_COLOR_CHANNELS.get(color_type)
     if channels is None:
+        return None
+    return channels * (bit_depth // 8)
+
+
+def _png_row_bytes(width: int, color_type: int, bit_depth: int) -> int:
+    """每行像素数据字节数（不含 filter 字节）。"""
+    if bit_depth < 8:
+        return (width * bit_depth + 7) // 8
+    return width * _PNG_COLOR_CHANNELS[color_type] * (bit_depth // 8)
+
+
+def _png_pixels(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Optional[str]]:
+    """解 IDAT + 还原 filter（+ Adam7 重组），返回光栅顺序像素字节流。"""
+    width = ihdr["width"]
+    height = ihdr["height"]
+    color_type = ihdr["color_type"]
+    bit_depth = ihdr["bit_depth"]
+    bpp = _png_bpp(color_type, bit_depth)
+    if bpp is None:
         return None, f"color_type {color_type} 不支持"
-    bpp = channels * (bit_depth // 8)
-    row_bytes = ihdr["width"] * bpp
-    stride = 1 + row_bytes
-    expected = ihdr["height"] * stride
 
     # 防解压炸弹：按 IHDR 声明尺寸在解压前拦截超大图
-    if expected <= 0:
+    if width <= 0 or height <= 0:
         return None, "无效的图片尺寸"
-    if expected > STEGO_MAX_PIXEL_BYTES:
-        return None, f"图片尺寸过大（{expected} 字节），跳过 LSB 提取"
+    if _png_row_bytes(width, color_type, bit_depth) * height > STEGO_MAX_PIXEL_BYTES:
+        return None, f"图片尺寸过大（{_png_row_bytes(width, color_type, bit_depth) * height} 字节），跳过 LSB 提取"
 
     # 拼接所有 IDAT 并解压（max_length 兜底，防畸形流解压出超声明尺寸的数据）
     idat_parts: List[bytes] = []
@@ -201,26 +222,127 @@ def _png_lsb(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Option
     except zlib.error:
         return None, "IDAT 解压失败"
 
-    if len(raw) < expected:
-        return None, "解压数据不完整"
+    if ihdr["interlace"] == 0:
+        row_bytes = _png_row_bytes(width, color_type, bit_depth)
+        stride = 1 + row_bytes
+        if len(raw) < height * stride:
+            return None, "解压数据不完整"
+        pixels = bytearray()
+        prev = b""
+        for r in range(height):
+            line = raw[r * stride:(r + 1) * stride]
+            if len(line) < stride:
+                return None, "扫描线不完整"
+            row = _unfilter(line, prev, bpp)
+            pixels.extend(row)
+            prev = row
+        return bytes(pixels), None
 
-    # 逐行还原 filter，得到原始像素字节
-    pixels = bytearray()
-    prev = b""
-    for r in range(ihdr["height"]):
-        line = raw[r * stride:(r + 1) * stride]
-        if len(line) < 1 + row_bytes:
-            return None, "扫描线不完整"
-        row = _unfilter(line, prev, bpp)
-        pixels.extend(row)
-        prev = row
+    return _adam7_reassemble(raw, ihdr, bpp)
+
+
+def _adam7_reassemble(raw: bytes, ihdr: Dict[str, int], bpp: int) -> Tuple[Optional[bytes], Optional[str]]:
+    """Adam7 交错 7-pass 重组（仅 bit_depth>=8，每像素整数字节）。"""
+    width = ihdr["width"]
+    height = ihdr["height"]
+    full = bytearray(width * bpp * height)
+    offset = 0
+    n = len(raw)
+    for start_x, start_y, step_x, step_y in _ADAM7_PASSES:
+        if width <= start_x or height <= start_y:
+            continue
+        pass_w = (width - start_x + step_x - 1) // step_x
+        pass_h = (height - start_y + step_y - 1) // step_y
+        stride = 1 + pass_w * bpp
+        prev = b""
+        for py in range(pass_h):
+            if offset + stride > n:
+                return None, "Adam7 数据不完整"
+            line = raw[offset:offset + stride]
+            row = _unfilter(line, prev, bpp)
+            prev = row
+            offset += stride
+            target_y = start_y + py * step_y
+            for px in range(pass_w):
+                target_x = start_x + px * step_x
+                src = px * bpp
+                dst = (target_y * width + target_x) * bpp
+                full[dst:dst + bpp] = row[src:src + bpp]
+    return bytes(full), None
+
+
+def _index_lsb(pixels: bytes, width: int, bit_depth: int) -> bytes:
+    """palette 索引图：逐行解包索引，取每索引最低位拼成字节流。"""
+    row_bytes = (width * bit_depth + 7) // 8
+    out = bytearray()
+    cur = 0
+    nbits = 0
+    mask = (1 << bit_depth) - 1
+    nrows = len(pixels) // row_bytes
+    for r in range(nrows):
+        row = pixels[r * row_bytes:(r + 1) * row_bytes]
+        pixel_count = 0
+        for byte in row:
+            for shift in range(8 - bit_depth, -1, -bit_depth):
+                if pixel_count >= width:
+                    break
+                index = (byte >> shift) & mask
+                cur = (cur << 1) | (index & 1)
+                nbits += 1
+                if nbits == 8:
+                    out.append(cur)
+                    cur = 0
+                    nbits = 0
+                pixel_count += 1
+    return bytes(out)
+
+
+def _extract_lsb_16bit(pixel_bytes: bytes) -> bytes:
+    """16 位深：每 2 字节（1 个样本）取低字节 bit0 拼成字节流。"""
+    out = bytearray()
+    cur = 0
+    nbits = 0
+    for i in range(1, len(pixel_bytes), 2):
+        cur = (cur << 1) | (pixel_bytes[i] & 1)
+        nbits += 1
+        if nbits == 8:
+            out.append(cur)
+            cur = 0
+            nbits = 0
+    return bytes(out)
+
+
+def _png_lsb(data: bytes, ihdr: Dict[str, int]) -> Tuple[Optional[bytes], Optional[str]]:
+    """解像素 + 按类型取 LSB。返回 (lsb 字节, 不支持原因或 None)。"""
+    color_type = ihdr["color_type"]
+    bit_depth = ihdr["bit_depth"]
+
+    if color_type == 3:
+        if bit_depth not in (1, 2, 4, 8):
+            return None, f"palette 位深 {bit_depth} 不支持"
+        if ihdr["interlace"] != 0:
+            return None, "interlaced palette 图不支持 LSB 提取"
+    else:
+        if bit_depth not in (8, 16):
+            return None, f"位深 {bit_depth} 不支持 LSB 提取"
+
+    pixels, note = _png_pixels(data, ihdr)
+    if note:
+        return None, note
 
     # LSB 扫描只用到前 STEGO_LSB_SCAN 字节，像素只需前 8 倍即可，避免全量位运算
-    return _extract_lsb(bytes(pixels[: STEGO_LSB_SCAN * 8])), None
+    limit = STEGO_LSB_SCAN * 8
+    if color_type == 3:
+        lsb = _index_lsb(pixels[:limit], ihdr["width"], bit_depth)
+    elif bit_depth == 16:
+        lsb = _extract_lsb_16bit(pixels[:limit])
+    else:
+        lsb = _extract_lsb(pixels[:limit])
+    return lsb, None
 
 
 def _png_chunk_texts(data: bytes) -> List[str]:
-    """提取 tEXt / zTXt 文本 chunk 内容（keyword\\0text，zTXt 解压）。"""
+    """提取 tEXt / zTXt / iTXt 文本 chunk 内容（zTXt/iTXt 解压，tEXt 原文）。"""
     texts: List[str] = []
     for ctype, cdata in _iter_png_chunks(data):
         if ctype == b"tEXt":
@@ -228,13 +350,38 @@ def _png_chunk_texts(data: bytes) -> List[str]:
                 text = cdata.split(b"\x00", 1)[1]
                 texts.append(text.decode("latin-1", "replace")[:STEGO_TRAILING_MAX])
         elif ctype == b"zTXt":
-            parts = cdata.split(b"\x00", 2)
-            if len(parts) >= 3 and parts[1] == b"\x00":
+            # zTXt: keyword\0 + compression_method(1 字节，须为 0) + zlib 压缩文本
+            parts = cdata.split(b"\x00", 1)
+            if len(parts) < 2 or len(parts[1]) < 1:
+                continue
+            if parts[1][0] != 0:
+                continue
+            try:
+                text = zlib.decompress(parts[1][1:])
+                texts.append(text.decode("latin-1", "replace")[:STEGO_TRAILING_MAX])
+            except zlib.error:
+                continue
+        elif ctype == b"iTXt":
+            # keyword\0 + comp_flag(1) + comp_method(1) + lang\0 + trans_kw\0 + text
+            parts = cdata.split(b"\x00", 1)
+            if len(parts) < 2 or len(parts[1]) < 2:
+                continue
+            comp_flag, comp_method = parts[1][0], parts[1][1]
+            tail = parts[1][2:]
+            if b"\x00" not in tail:
+                continue
+            tail = tail.split(b"\x00", 1)[1]  # 跳过 language tag
+            if b"\x00" not in tail:
+                continue
+            text_data = tail.split(b"\x00", 1)[1]  # 跳过 translated keyword
+            if comp_flag == 1 and comp_method == 0:
                 try:
-                    text = zlib.decompress(parts[2])
-                    texts.append(text.decode("latin-1", "replace")[:STEGO_TRAILING_MAX])
+                    text = zlib.decompress(text_data)
                 except zlib.error:
                     continue
+            else:
+                text = text_data
+            texts.append(text.decode("utf-8", "replace")[:STEGO_TRAILING_MAX])
     return texts
 
 
@@ -358,7 +505,7 @@ def format_stego_summary(result: Dict[str, Any]) -> str:
 
 
 def image_stego_lines(path: Path) -> List[str]:
-    """读图片字节做隐写分析，返回注入上下文的行列表；不支持/失败返回空列表。
+    """读图片字节做字节级分析（隐写 + JPEG 结构解析），返回注入上下文的行列表；不支持/失败返回空列表。
 
     这是给 attachment_context 的单行接入点：纯本地字节分析，同步、很快、失败即
     静默降级为 []，不影响视觉分析结果与整条任务链。
@@ -367,6 +514,18 @@ def image_stego_lines(path: Path) -> List[str]:
         data = path.read_bytes()
     except OSError:
         return []
+    # JPEG 走结构解析（EXIF/COM/尾随），与 PNG/BMP 的 LSB 隐写互补
+    if data.startswith(b"\xff\xd8"):
+        try:
+            return ["\n" + format_jpeg_summary(analyze_jpeg_bytes(data))]
+        except ValueError:
+            return []
+    # GIF 走结构解析（comment/调色板/多帧）
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        try:
+            return ["\n" + format_gif_summary(analyze_gif_bytes(data))]
+        except ValueError:
+            return []
     result = analyze_image_stego(data)
     if result is None:
         return []

@@ -36,6 +36,11 @@ class ClassifyTests(unittest.TestCase):
         result = classify_basic_file(b"\x89PNG\r\n\x1a\n")
         self.assertEqual(result, "image")
 
+    def test_classify_bmp(self):
+        # BMP 魔数为前两字节 "BM"
+        result = classify_basic_file(b"BM" + b"\x00" * 20)
+        self.assertEqual(result, "image")
+
 
 class StructuredParseTests(unittest.TestCase):
     def test_parse_json(self):
