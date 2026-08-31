@@ -1230,7 +1230,13 @@ async def api_session_messages(session_id: str, _auth=Depends(require_ready_stat
 
 @app.get("/api/mcp-status")
 async def api_mcp_status(_auth=Depends(require_ready_state)) -> JSONResponse:
-    """MCP 服务器连接状态 + 工具清单（前端 MCP 状态页数据源）。"""
+    """MCP 服务器连接状态 + 工具清单（前端 MCP 状态页数据源）。
+
+    注意：必须先触发 _ensure_started()——MCP 生命周期是惰性启动的，
+    仅当用户发送过任务或建立过 SSE 才拉起。若不在这里触发，用户在
+    首次聊天前打开「设置 / MCP」面板会一直看到「未连接」。
+    """
+    _ensure_started()
     from ..tools.mcp_client import mcp_lifecycle, mcp_client
     servers: list = []
     for server_name, entry in getattr(mcp_client, "_servers", {}).items():
